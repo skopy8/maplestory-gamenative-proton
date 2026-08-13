@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-arm64ec:
     runs-on: ubuntu-24.04
 
     steps:
@@ -122,6 +122,51 @@ jobs:
         run: |
           bash build-scripts/build-step-arm64ec.sh --install
 
+      # Create a tar checkpoint BEFORE the packaging job.
+      # The tar preserves executable bits and symlinks in bin/lib/share.
+      - name: Create compiled Proton checkpoint
+        run: |
+          set -euxo pipefail
+          test -d "$HOME/compiled-files-aarch64/bin"
+          test -d "$HOME/compiled-files-aarch64/lib"
+          test -d "$HOME/compiled-files-aarch64/share"
+
+          tar -C "$HOME/compiled-files-aarch64" \
+            -cf "$GITHUB_WORKSPACE/compiled-proton-checkpoint.tar" \
+            bin lib share
+
+          ls -lh "$GITHUB_WORKSPACE/compiled-proton-checkpoint.tar"
+
+      - name: Upload compiled Proton checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-proton-arm64ec-checkpoint
+          path: compiled-proton-checkpoint.tar
+          retention-days: 7
+          compression-level: 0
+
+  package-wcp:
+    needs: build-arm64ec
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download compiled Proton checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: compiled-proton-arm64ec-checkpoint
+          path: checkpoint
+
+      - name: Restore compiled Proton files
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/compiled-files-aarch64"
+          tar -C "$HOME/compiled-files-aarch64" \
+            -xf checkpoint/compiled-proton-checkpoint.tar
+
+          test -d "$HOME/compiled-files-aarch64/bin"
+          test -d "$HOME/compiled-files-aarch64/lib"
+          test -d "$HOME/compiled-files-aarch64/share"
+
       - name: Download GameNative Proton 11 prefix pack
         run: |
           wget \
@@ -160,7 +205,8 @@ jobs:
           mv proton-11.0-1-arm64ec-maplestory.wcp "$GITHUB_WORKSPACE/"
 
           echo "=== WCP contents ==="
-          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" > /tmp/wcp-contents.txt
+          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" \
+            > /tmp/wcp-contents.txt
           head -80 /tmp/wcp-contents.txt
 
           echo "=== WCP size ==="
