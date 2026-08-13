@@ -160,7 +160,8 @@ jobs:
           mv proton-11.0-1-arm64ec-maplestory.wcp "$GITHUB_WORKSPACE/"
 
           echo "=== WCP contents ==="
-          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" | head -80
+          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" > /tmp/wcp-contents.txt
+          head -80 /tmp/wcp-contents.txt
 
           echo "=== WCP size ==="
           ls -lh "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp"
