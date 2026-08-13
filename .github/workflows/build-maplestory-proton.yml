@@ -1,0 +1,173 @@
+name: Build MapleStory GameNative Proton
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout exact GameNative Proton 11 baseline
+        uses: actions/checkout@v4
+        with:
+          repository: GameNative/proton-wine
+          ref: f7c0166
+          submodules: recursive
+
+      - name: Apply MapleStory GE-Proton patches
+        run: |
+          set -euxo pipefail
+
+          curl -fsSL \
+            https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/3453c5b/patches/game-patches/maplestory-spi-stickykeys-filterkeys.patch \
+            -o /tmp/maplestory-spi.patch
+
+          curl -fsSL \
+            https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/3453c5b/patches/game-patches/maplestory-kernelbase-charprev-null.patch \
+            -o /tmp/maplestory-charprev.patch
+
+          git apply --check /tmp/maplestory-spi.patch
+          git apply /tmp/maplestory-spi.patch
+
+          git apply --check /tmp/maplestory-charprev.patch
+          git apply /tmp/maplestory-charprev.patch
+
+          git diff --check
+
+          echo "=== SPI patch verification ==="
+          grep -nE 'WINE_SPI_(WARN|FIXME)\(SPI_SET(FILTER|STICKY)KEYS\)' dlls/win32u/sysparams.c
+
+          echo "=== CharPrev patch verification ==="
+          sed -n '1068,1095p' dlls/kernelbase/string.c
+
+      - name: Install build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            wget \
+            curl \
+            unzip \
+            flex \
+            bison \
+            gettext \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            mingw-w64 \
+            gcc-multilib \
+            g++-multilib \
+            libfreetype6-dev \
+            libfreetype6-dev:i386 \
+            libpng-dev \
+            libpng-dev:i386 \
+            zlib1g-dev \
+            zlib1g-dev:i386
+
+      - name: Download GameNative aarch64 termuxfs
+        run: |
+          mkdir -p "$HOME/termuxfs/aarch64"
+          cd "$HOME/termuxfs/aarch64"
+          wget https://github.com/GameNative/termux-on-gha/releases/download/build-20260218/termuxfs-aarch64.tar
+          tar -xf termuxfs-aarch64.tar
+
+      - name: Install Android NDK r27d
+        run: |
+          mkdir -p "$HOME/Android/Sdk/ndk"
+          cd "$HOME/Android/Sdk/ndk"
+          wget https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+
+      - name: Install LLVM MinGW
+        run: |
+          mkdir -p "$HOME/toolchains"
+          cd "$HOME/toolchains"
+          wget https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+
+      - name: Generate configure script
+        run: |
+          bash build-scripts/build-step0-autogen.sh
+
+      - name: Build Wine tools
+        run: |
+          bash build-scripts/build-step0.sh
+
+      - name: Build Android sysvshm
+        run: |
+          bash build-scripts/build-step-arm64ec.sh --build-sysvshm
+
+      - name: Configure ARM64EC build
+        run: |
+          bash build-scripts/build-step-arm64ec.sh --configure
+
+      - name: Build ARM64EC Proton Wine
+        run: |
+          bash build-scripts/build-step-arm64ec.sh --build
+
+      - name: Install ARM64EC Proton Wine
+        run: |
+          bash build-scripts/build-step-arm64ec.sh --install
+
+      - name: Download GameNative Proton 11 prefix pack
+        run: |
+          wget \
+            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec-11.txz \
+            -O "$GITHUB_WORKSPACE/prefixPack.txz"
+
+      - name: Create distinct GameNative profile
+        run: |
+          cat > "$GITHUB_WORKSPACE/profile.json" << 'EOF'
+          {
+            "type": "Proton",
+            "versionName": "11.0-1-arm64ec-maplestory",
+            "versionCode": 2,
+            "description": "GameNative Proton 11.0-1 ARM64EC baseline f7c0166 with GE-Proton MapleStory patches #601 and #603",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          EOF
+
+      - name: Package GameNative WCP
+        run: |
+          set -euxo pipefail
+          OUTPUT_DIR="$HOME/compiled-files-aarch64"
+
+          cp "$GITHUB_WORKSPACE/prefixPack.txz" "$OUTPUT_DIR/"
+          cp "$GITHUB_WORKSPACE/profile.json" "$OUTPUT_DIR/"
+
+          cd "$OUTPUT_DIR"
+          tar cJf proton-11.0-1-arm64ec-maplestory.wcp \
+            bin lib share prefixPack.txz profile.json
+
+          mv proton-11.0-1-arm64ec-maplestory.wcp "$GITHUB_WORKSPACE/"
+
+          echo "=== WCP contents ==="
+          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" | head -80
+
+          echo "=== WCP size ==="
+          ls -lh "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp"
+
+      - name: Upload patched WCP
+        uses: actions/upload-artifact@v4
+        with:
+          name: maplestory-proton-11-arm64ec
+          path: proton-11.0-1-arm64ec-maplestory.wcp
+          retention-days: 30
