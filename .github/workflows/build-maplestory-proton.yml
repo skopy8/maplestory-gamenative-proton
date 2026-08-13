@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: GameNative/proton-wine
-          ref: f7c0166
+          ref: f7c016668db739f563e3d4781c27ed085843d63a
           submodules: recursive
 
       - name: Apply MapleStory GE-Proton patches
