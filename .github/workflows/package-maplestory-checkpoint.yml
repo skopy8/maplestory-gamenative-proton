@@ -26,24 +26,93 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Inspect checkpoint
+      - name: Inspect and extract checkpoint
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "=== Checkpoint top level ==="
-          find checkpoint -maxdepth 3 -type d -print | sort | head -200
+          echo "=== Everything downloaded ==="
+          find checkpoint -maxdepth 3 -printf '%M %s %p\n' | sort
 
           echo
-          echo "=== Searching for Wine root ==="
+          echo "=== File types ==="
+          find checkpoint -type f -print0 | while IFS= read -r -d '' f; do
+            echo "---- $f"
+            file "$f"
+          done
 
+          mkdir -p checkpoint_extracted
+
+          # First see whether the artifact already contains bin/lib/share.
           ROOT=""
 
           if [ -d "checkpoint/bin" ] &&
              [ -d "checkpoint/lib" ] &&
              [ -d "checkpoint/share" ]; then
+
             ROOT="$GITHUB_WORKSPACE/checkpoint"
+
           else
+            echo
+            echo "=== Looking for archive inside artifact ==="
+
+            ARCHIVE="$(find checkpoint -type f | head -n 1 || true)"
+
+            if [ -z "$ARCHIVE" ]; then
+              echo "ERROR: Artifact contains no files."
+              exit 1
+            fi
+
+            echo "Candidate archive:"
+            echo "$ARCHIVE"
+
+            TYPE="$(file -b "$ARCHIVE")"
+            echo "Detected type:"
+            echo "$TYPE"
+
+            case "$TYPE" in
+
+              *"XZ compressed data"*)
+                echo "Extracting XZ-compressed tar archive..."
+                tar -xJf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"Zstandard compressed data"*)
+                echo "Extracting Zstandard-compressed tar archive..."
+                tar --zstd -xf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"gzip compressed data"*)
+                echo "Extracting gzip-compressed tar archive..."
+                tar -xzf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"POSIX tar archive"*)
+                echo "Extracting plain tar archive..."
+                tar -xf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"Zip archive data"*)
+                echo "Extracting ZIP archive..."
+                unzip -q "$ARCHIVE" -d checkpoint_extracted
+                ;;
+
+              *)
+                echo "ERROR: Don't know how to extract:"
+                echo "$TYPE"
+                exit 1
+                ;;
+            esac
+
+            echo
+            echo "=== Extracted structure ==="
+            find checkpoint_extracted -maxdepth 4 -printf '%M %s %p\n' |
+              sort |
+              head -300
+
+            echo
+            echo "=== Searching extracted checkpoint for bin/lib/share ==="
+
             while IFS= read -r candidate; do
               candidate="$(dirname "$candidate")"
 
@@ -52,22 +121,35 @@ jobs:
                 ROOT="$GITHUB_WORKSPACE/$candidate"
                 break
               fi
-            done < <(find checkpoint -type d -name bin)
+            done < <(find checkpoint_extracted -type d -name bin)
+
           fi
 
           if [ -z "$ROOT" ]; then
-            echo "ERROR: Could not locate checkpoint root containing bin/lib/share"
+            echo
+            echo "ERROR: Could not locate checkpoint root containing:"
+            echo "  bin/"
+            echo "  lib/"
+            echo "  share/"
             exit 1
           fi
 
-          echo "CHECKPOINT_ROOT=$ROOT" >> "$GITHUB_ENV"
-          echo "Found checkpoint root:"
+          echo
+          echo "=== FOUND CHECKPOINT ROOT ==="
           echo "$ROOT"
 
+          echo "CHECKPOINT_ROOT=$ROOT" >> "$GITHUB_ENV"
+
           echo
-          echo "=== bin contents BEFORE repair ==="
+          echo "=== Wine bin directory ==="
           ls -lah "$ROOT/bin"
 
+          echo
+          echo "=== Wine-related files ==="
+          find "$ROOT/bin" -maxdepth 1 \
+            \( -name 'wine*' -o -name 'wineserver*' \) \
+            -printf '%M %s %p -> %l\n' |
+            sort
       - name: Repair executable permissions
         shell: bash
         run: |
