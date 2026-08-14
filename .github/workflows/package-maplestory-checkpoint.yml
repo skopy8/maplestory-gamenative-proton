@@ -104,12 +104,18 @@ jobs:
                 ;;
             esac
 
-            echo
-            echo "=== Extracted structure ==="
-            find checkpoint_extracted -maxdepth 4 -printf '%M %s %p\n' |
-              sort |
-              head -300
+          echo
+          echo "=== Extracted structure ==="
 
+          find checkpoint_extracted -maxdepth 4 \
+            -printf '%M %s %p\n' \
+            > extracted-structure.txt
+
+          sort extracted-structure.txt \
+            > extracted-structure-sorted.txt
+
+          head -300 extracted-structure-sorted.txt
+          
             echo
             echo "=== Searching extracted checkpoint for bin/lib/share ==="
 
