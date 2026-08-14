@@ -278,28 +278,79 @@ jobs:
           ls -lh "$WCP"
 
           echo
+          echo "=== Test archive integrity ==="
+          xz -t "$WCP"
+
+          echo
+          echo "=== Generate archive file lists ==="
+
+          # Generate these ONCE instead of repeatedly piping tar into
+          # grep/head. This avoids SIGPIPE failures under pipefail.
+          tar tJf "$WCP" > wcp-files.txt
+          tar tvJf "$WCP" > wcp-files-long.txt
+
+          echo
           echo "=== Profile inside WCP ==="
           tar xJOf "$WCP" profile.json
 
           echo
-          echo "=== Required top-level paths ==="
-          tar tJf "$WCP" |
-            grep -E '^(bin/|lib/|share/|prefixPack\.txz$|profile\.json$)' |
-            head -100
+          echo "=== Required top-level contents ==="
+          grep -E \
+            '^(bin/|lib/|share/|prefixPack\.txz$|profile\.json$)' \
+            wcp-files.txt \
+            > required-paths.txt || true
 
-          echo
-          echo "=== Wine launchers inside WCP ==="
-          tar tvJf "$WCP" |
-            grep -E ' bin/(wine|wine64|wineserver)$' || true
+          head -100 required-paths.txt
 
           echo
           echo "=== Explicit required-file checks ==="
-          tar tJf "$WCP" | grep -qx 'bin/wine'
-          tar tJf "$WCP" | grep -qx 'bin/wineserver'
+
+          grep -Fxq 'bin/wine' wcp-files.txt
+          echo "FOUND: bin/wine"
+
+          grep -Fxq 'bin/wineserver' wcp-files.txt
+          echo "FOUND: bin/wineserver"
+
+          grep -Fxq 'prefixPack.txz' wcp-files.txt
+          echo "FOUND: prefixPack.txz"
+
+          grep -Fxq 'profile.json' wcp-files.txt
+          echo "FOUND: profile.json"
+
+          echo
+          echo "=== Wine launchers and permissions inside WCP ==="
+
+          grep -E \
+            ' bin/(wine|wine64|wineserver)$' \
+            wcp-files-long.txt || true
+
+          echo
+          echo "=== Confirm wine executable bit ==="
+
+          WINE_MODE="$(awk '$NF == "bin/wine" {print $1}' wcp-files-long.txt)"
+          WINESERVER_MODE="$(awk '$NF == "bin/wineserver" {print $1}' wcp-files-long.txt)"
+
+          echo "bin/wine mode:       $WINE_MODE"
+          echo "bin/wineserver mode: $WINESERVER_MODE"
+
+          if [[ "$WINE_MODE" != *x* ]]; then
+            echo "ERROR: bin/wine is not executable inside WCP"
+            exit 1
+          fi
+
+          if [[ "$WINESERVER_MODE" != *x* ]]; then
+            echo "ERROR: bin/wineserver is not executable inside WCP"
+            exit 1
+          fi
+
+          echo
+          echo "=== Archive statistics ==="
+          echo "Total entries: $(wc -l < wcp-files.txt)"
+          du -h "$WCP"
 
           echo
           echo "WCP validation PASSED"
-
+          
       - name: Upload corrected WCP
         uses: actions/upload-artifact@v4
         with:
