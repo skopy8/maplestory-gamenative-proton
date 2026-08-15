@@ -1,186 +1,324 @@
-name: Build MapleStory GameNative Proton
+name: Package MapleStory ARM64EC Checkpoint
 
 on:
   workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Workflow run ID containing compiled-proton-arm64ec-checkpoint"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
-  build-arm64ec:
+  package:
     runs-on: ubuntu-24.04
 
-    steps:
-      - name: Free up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
-
-      - name: Checkout exact GameNative Proton 11 baseline
-        uses: actions/checkout@v4
-        with:
-          repository: GameNative/proton-wine
-          ref: f7c016668db739f563e3d4781c27ed085843d63a
-          submodules: recursive
-
-      - name: Apply MapleStory GE-Proton patches
-        run: |
-          set -euxo pipefail
-
-          curl -fsSL \
-            https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/3453c5b/patches/game-patches/maplestory-spi-stickykeys-filterkeys.patch \
-            -o /tmp/maplestory-spi.patch
-
-          curl -fsSL \
-            https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/3453c5b/patches/game-patches/maplestory-kernelbase-charprev-null.patch \
-            -o /tmp/maplestory-charprev.patch
-
-          git apply --check /tmp/maplestory-spi.patch
-          git apply /tmp/maplestory-spi.patch
-
-          git apply --check /tmp/maplestory-charprev.patch
-          git apply /tmp/maplestory-charprev.patch
-
-          git diff --check
-
-          echo "=== SPI patch verification ==="
-          grep -nE 'WINE_SPI_(WARN|FIXME)\(SPI_SET(FILTER|STICKY)KEYS\)' dlls/win32u/sysparams.c
-
-          echo "=== CharPrev patch verification ==="
-          sed -n '1068,1095p' dlls/kernelbase/string.c
-
-      - name: Install build dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            git \
-            wget \
-            curl \
-            unzip \
-            flex \
-            bison \
-            gettext \
-            autoconf \
-            automake \
-            libtool \
-            pkg-config \
-            mingw-w64 \
-            gcc-multilib \
-            g++-multilib \
-            libfreetype6-dev \
-            libfreetype6-dev:i386 \
-            libpng-dev \
-            libpng-dev:i386 \
-            zlib1g-dev \
-            zlib1g-dev:i386
-
-      - name: Download GameNative aarch64 termuxfs
-        run: |
-          mkdir -p "$HOME/termuxfs/aarch64"
-          cd "$HOME/termuxfs/aarch64"
-          wget https://github.com/GameNative/termux-on-gha/releases/download/build-20260218/termuxfs-aarch64.tar
-          tar -xf termuxfs-aarch64.tar
-
-      - name: Install Android NDK r27d
-        run: |
-          mkdir -p "$HOME/Android/Sdk/ndk"
-          cd "$HOME/Android/Sdk/ndk"
-          wget https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
-          unzip -q android-ndk-r27d-linux.zip
-          mv android-ndk-r27d 27.3.13750724
-
-      - name: Install LLVM MinGW
-        run: |
-          mkdir -p "$HOME/toolchains"
-          cd "$HOME/toolchains"
-          wget https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
-          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
-
-      - name: Generate configure script
-        run: |
-          bash build-scripts/build-step0-autogen.sh
-
-      - name: Build Wine tools
-        run: |
-          bash build-scripts/build-step0.sh
-
-      - name: Build Android sysvshm
-        run: |
-          bash build-scripts/build-step-arm64ec.sh --build-sysvshm
-
-      - name: Configure ARM64EC build
-        run: |
-          bash build-scripts/build-step-arm64ec.sh --configure
-
-      - name: Build ARM64EC Proton Wine
-        run: |
-          bash build-scripts/build-step-arm64ec.sh --build
-
-      - name: Install ARM64EC Proton Wine
-        run: |
-          bash build-scripts/build-step-arm64ec.sh --install
-
-      # Create a tar checkpoint BEFORE the packaging job.
-      # The tar preserves executable bits and symlinks in bin/lib/share.
-      - name: Create compiled Proton checkpoint
-        run: |
-          set -euxo pipefail
-          test -d "$HOME/compiled-files-aarch64/bin"
-          test -d "$HOME/compiled-files-aarch64/lib"
-          test -d "$HOME/compiled-files-aarch64/share"
-
-          tar -C "$HOME/compiled-files-aarch64" \
-            -cf "$GITHUB_WORKSPACE/compiled-proton-checkpoint.tar" \
-            bin lib share
-
-          ls -lh "$GITHUB_WORKSPACE/compiled-proton-checkpoint.tar"
-
-      - name: Upload compiled Proton checkpoint
-        uses: actions/upload-artifact@v4
-        with:
-          name: compiled-proton-arm64ec-checkpoint
-          path: compiled-proton-checkpoint.tar
-          retention-days: 7
-          compression-level: 0
-
-  package-wcp:
-    needs: build-arm64ec
-    runs-on: ubuntu-24.04
+    env:
+      CUSTOM_VERSION: "11.0-1.1-arm64ec"
+      WCP_NAME: "proton-11.0-1.1-arm64ec.wcp"
 
     steps:
-      - name: Download compiled Proton checkpoint
+      # ------------------------------------------------------------
+      # 1. DOWNLOAD THE ALREADY-COMPILED CHECKPOINT
+      # ------------------------------------------------------------
+
+      - name: Download compiled ARM64EC checkpoint
         uses: actions/download-artifact@v4
         with:
           name: compiled-proton-arm64ec-checkpoint
           path: checkpoint
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
 
-      - name: Restore compiled Proton files
+      # ------------------------------------------------------------
+      # 2. EXTRACT CHECKPOINT AND FIND bin/lib/share ROOT
+      # ------------------------------------------------------------
+
+      - name: Inspect and extract checkpoint
+        shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$HOME/compiled-files-aarch64"
-          tar -C "$HOME/compiled-files-aarch64" \
-            -xf checkpoint/compiled-proton-checkpoint.tar
 
-          test -d "$HOME/compiled-files-aarch64/bin"
-          test -d "$HOME/compiled-files-aarch64/lib"
-          test -d "$HOME/compiled-files-aarch64/share"
+          echo "=== Everything downloaded ==="
+          find checkpoint -maxdepth 3 \
+            -printf '%M %s %p\n' \
+            > checkpoint-contents.txt
 
-      - name: Download GameNative Proton 11 prefix pack
+          sort checkpoint-contents.txt \
+            > checkpoint-contents-sorted.txt
+
+          cat checkpoint-contents-sorted.txt
+
+          echo
+          echo "=== File types ==="
+
+          find checkpoint -type f -print0 |
+          while IFS= read -r -d '' f; do
+            echo "---- $f"
+            file "$f"
+          done
+
+          ROOT=""
+
+          # The artifact may already directly contain bin/lib/share.
+          if [ -d "checkpoint/bin" ] &&
+             [ -d "checkpoint/lib" ] &&
+             [ -d "checkpoint/share" ]; then
+
+            ROOT="$GITHUB_WORKSPACE/checkpoint"
+
+          else
+            mkdir -p checkpoint_extracted
+
+            echo
+            echo "=== Looking for archive inside artifact ==="
+
+            ARCHIVE=""
+
+            while IFS= read -r candidate; do
+              ARCHIVE="$candidate"
+              break
+            done < <(find checkpoint -type f -print)
+
+            if [ -z "$ARCHIVE" ]; then
+              echo "ERROR: Artifact contains no files."
+              exit 1
+            fi
+
+            echo "Candidate archive:"
+            echo "$ARCHIVE"
+
+            TYPE="$(file -b "$ARCHIVE")"
+
+            echo "Detected type:"
+            echo "$TYPE"
+
+            case "$TYPE" in
+              *"XZ compressed data"*)
+                echo "Extracting XZ-compressed archive..."
+                tar -xJf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"Zstandard compressed data"*)
+                echo "Extracting Zstandard-compressed archive..."
+                tar --zstd -xf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"gzip compressed data"*)
+                echo "Extracting gzip-compressed archive..."
+                tar -xzf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"tar archive"*)
+                echo "Extracting tar archive..."
+                tar -xf "$ARCHIVE" -C checkpoint_extracted
+                ;;
+
+              *"Zip archive data"*)
+                echo "Extracting ZIP archive..."
+                unzip -q "$ARCHIVE" -d checkpoint_extracted
+                ;;
+
+              *)
+                echo "ERROR: Unknown checkpoint archive type:"
+                echo "$TYPE"
+                exit 1
+                ;;
+            esac
+
+            echo
+            echo "=== Extracted structure ==="
+
+            find checkpoint_extracted -maxdepth 4 \
+              -printf '%M %s %p\n' \
+              > extracted-structure.txt
+
+            sort extracted-structure.txt \
+              > extracted-structure-sorted.txt
+
+            sed -n '1,300p' extracted-structure-sorted.txt
+
+            echo
+            echo "=== Searching for bin/lib/share root ==="
+
+            if [ -d "checkpoint_extracted/bin" ] &&
+               [ -d "checkpoint_extracted/lib" ] &&
+               [ -d "checkpoint_extracted/share" ]; then
+
+              ROOT="$GITHUB_WORKSPACE/checkpoint_extracted"
+
+            else
+              while IFS= read -r bindir; do
+                candidate="$(dirname "$bindir")"
+
+                if [ -d "$candidate/lib" ] &&
+                   [ -d "$candidate/share" ]; then
+
+                  ROOT="$GITHUB_WORKSPACE/$candidate"
+                  break
+                fi
+
+              done < <(find checkpoint_extracted -type d -name bin -print)
+            fi
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo
+            echo "ERROR: Could not locate checkpoint root containing:"
+            echo "  bin/"
+            echo "  lib/"
+            echo "  share/"
+            exit 1
+          fi
+
+          echo
+          echo "=== FOUND CHECKPOINT ROOT ==="
+          echo "$ROOT"
+
+          echo "CHECKPOINT_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+          echo
+          echo "=== Top-level checkpoint contents ==="
+          ls -lah "$ROOT"
+
+          echo
+          echo "=== Wine bin directory ==="
+          ls -lah "$ROOT/bin"
+
+          echo
+          echo "=== Wine-related bin entries ==="
+
+          find "$ROOT/bin" -maxdepth 1 \
+            \( -name 'wine*' -o -name 'wineserver*' \) \
+            -printf '%M %s %p -> %l\n' \
+            > wine-bin-files.txt
+
+          sort wine-bin-files.txt
+
+      # ------------------------------------------------------------
+      # 3. VALIDATE AND REPAIR THE CHECKPOINT'S WINE LAUNCHER
+      # ------------------------------------------------------------
+
+      - name: Validate checkpoint Wine runtime
+        shell: bash
         run: |
+          set -euxo pipefail
+
+          ROOT="$CHECKPOINT_ROOT"
+
+          echo "=== Validate bin/wine ==="
+
+          test -L "$ROOT/bin/wine"
+
+          WINE_TARGET="$(readlink "$ROOT/bin/wine")"
+
+          echo "bin/wine target:"
+          echo "$WINE_TARGET"
+
+          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
+            echo "ERROR: Unexpected bin/wine target:"
+            echo "$WINE_TARGET"
+            exit 1
+          fi
+
+          echo
+          echo "=== Validate Wine target ==="
+
+          test -f "$ROOT/lib/wine/aarch64-unix/wine"
+
+          echo "FOUND:"
+          ls -l "$ROOT/lib/wine/aarch64-unix/wine"
+
+          echo
+          echo "=== Validate wineserver ==="
+
+          test -f "$ROOT/bin/wineserver"
+
+          echo "FOUND:"
+          ls -l "$ROOT/bin/wineserver"
+
+          echo
+          echo "=== Restore required executable permissions ==="
+
+          chmod 755 "$ROOT/lib/wine/aarch64-unix/wine"
+          chmod 755 "$ROOT/bin/wineserver"
+
+          # If any other regular Wine launcher files exist, make them executable.
+          find "$ROOT/bin" \
+            -maxdepth 1 \
+            -type f \
+            -name 'wine*' \
+            -exec chmod 755 {} \;
+
+          echo
+          echo "=== Validate resolved bin/wine ==="
+
+          test -e "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+
+          echo "bin/wine resolves successfully."
+
+          echo
+          echo "Resolved target:"
+          readlink -f "$ROOT/bin/wine"
+
+          echo
+          echo "File type:"
+          file "$(readlink -f "$ROOT/bin/wine")"
+
+          echo
+          echo "=== Final runtime permissions ==="
+
+          ls -l \
+            "$ROOT/bin/wine" \
+            "$ROOT/bin/wineserver" \
+            "$ROOT/lib/wine/aarch64-unix/wine"
+
+          echo
+          echo "Checkpoint Wine runtime validation PASSED"
+
+      # ------------------------------------------------------------
+      # 4. GET GAMENATIVE ARM64EC PREFIX
+      # ------------------------------------------------------------
+
+      - name: Download ARM64EC prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
           wget \
-            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec-11.txz \
-            -O "$GITHUB_WORKSPACE/prefixPack.txz"
+            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec.txz \
+            -O prefixPack.txz
 
-      - name: Create distinct GameNative profile
+          test -s prefixPack.txz
+
+          echo "=== Prefix downloaded ==="
+          ls -lh prefixPack.txz
+
+      # ------------------------------------------------------------
+      # 5. CREATE A GAMENATIVE-COMPATIBLE PROFILE
+      #
+      # IMPORTANT:
+      # Do NOT put "maplestory" or any other word in versionName.
+      #
+      # GameNative must see a normal numeric ARM64EC Proton identifier.
+      # ------------------------------------------------------------
+
+      - name: Generate GameNative Proton profile
+        shell: bash
         run: |
-          cat > "$GITHUB_WORKSPACE/profile.json" << 'EOF'
+          set -euxo pipefail
+
+          cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1-arm64ec-maplestory",
+            "versionName": "11.0-1.1-arm64ec",
             "versionCode": 2,
-            "description": "GameNative Proton 11.0-1 ARM64EC baseline f7c0166 with GE-Proton MapleStory patches #601 and #603",
+            "description": "Proton 11.0-1 ARM64EC with MapleStory SPI and CharPrev compatibility patches",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -190,31 +328,227 @@ jobs:
           }
           EOF
 
-      - name: Package GameNative WCP
+          echo "=== Generated profile ==="
+          cat profile.json
+
+          echo
+          echo "=== Confirm safe versionName ==="
+
+          grep -Fq '"versionName": "11.0-1.1-arm64ec"' profile.json
+
+          echo "Profile versionName is correct."
+
+      # ------------------------------------------------------------
+      # 6. BUILD THE NEW WCP
+      # ------------------------------------------------------------
+
+      - name: Build WCP
+        shell: bash
         run: |
           set -euxo pipefail
-          OUTPUT_DIR="$HOME/compiled-files-aarch64"
 
-          cp "$GITHUB_WORKSPACE/prefixPack.txz" "$OUTPUT_DIR/"
-          cp "$GITHUB_WORKSPACE/profile.json" "$OUTPUT_DIR/"
+          ROOT="$CHECKPOINT_ROOT"
 
-          cd "$OUTPUT_DIR"
-          tar cJf proton-11.0-1-arm64ec-maplestory.wcp \
-            bin lib share prefixPack.txz profile.json
+          cp prefixPack.txz "$ROOT/prefixPack.txz"
+          cp profile.json "$ROOT/profile.json"
 
-          mv proton-11.0-1-arm64ec-maplestory.wcp "$GITHUB_WORKSPACE/"
+          echo "=== Packaging from ==="
+          echo "$ROOT"
 
-          echo "=== WCP contents ==="
-          tar tJf "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp" \
-            > /tmp/wcp-contents.txt
-          head -80 /tmp/wcp-contents.txt
+          echo
+          echo "=== Package inputs ==="
 
-          echo "=== WCP size ==="
-          ls -lh "$GITHUB_WORKSPACE/proton-11.0-1-arm64ec-maplestory.wcp"
+          ls -ld \
+            "$ROOT/bin" \
+            "$ROOT/lib" \
+            "$ROOT/share"
 
-      - name: Upload patched WCP
+          ls -lh \
+            "$ROOT/prefixPack.txz" \
+            "$ROOT/profile.json"
+
+          cd "$ROOT"
+
+          tar cJf \
+            "$GITHUB_WORKSPACE/$WCP_NAME" \
+            bin \
+            lib \
+            share \
+            prefixPack.txz \
+            profile.json
+
+          echo
+          echo "=== WCP created ==="
+
+          ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
+
+      # ------------------------------------------------------------
+      # 7. VALIDATE THE ACTUAL FINISHED WCP
+      # ------------------------------------------------------------
+
+      - name: Validate final WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          WCP="$GITHUB_WORKSPACE/$WCP_NAME"
+
+          echo "=== Confirm WCP exists ==="
+
+          test -f "$WCP"
+          test -s "$WCP"
+
+          ls -lh "$WCP"
+
+          echo
+          echo "=== Test XZ integrity ==="
+
+          xz -t "$WCP"
+
+          echo "XZ integrity PASSED"
+
+          echo
+          echo "=== Generate archive lists ==="
+
+          tar tJf "$WCP" > wcp-files.txt
+          tar tvJf "$WCP" > wcp-files-long.txt
+
+          echo
+          echo "=== Required archive entries ==="
+
+          for f in \
+            bin/wine \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            prefixPack.txz \
+            profile.json
+          do
+            grep -Fxq "$f" wcp-files.txt
+            echo "FOUND: $f"
+          done
+
+          grep -Fxq 'bin/' wcp-files.txt
+          echo "FOUND: bin/"
+
+          grep -Fxq 'lib/' wcp-files.txt
+          echo "FOUND: lib/"
+
+          grep -Fxq 'share/' wcp-files.txt
+          echo "FOUND: share/"
+
+          echo
+          echo "=== Profile stored inside WCP ==="
+
+          tar xJOf "$WCP" profile.json \
+            > packaged-profile.json
+
+          cat packaged-profile.json
+
+          echo
+          echo "=== Validate packaged versionName ==="
+
+          grep -Fq \
+            '"versionName": "11.0-1.1-arm64ec"' \
+            packaged-profile.json
+
+          echo "Packaged profile versionName PASSED"
+
+          echo
+          echo "=== Extract Wine launcher AND its target ==="
+
+          rm -rf wcp-validation
+          mkdir -p wcp-validation
+
+          tar xJf "$WCP" \
+            -C wcp-validation \
+            bin/wine \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== Extracted launcher files ==="
+
+          ls -l \
+            wcp-validation/bin/wine \
+            wcp-validation/bin/wineserver \
+            wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== Validate bin/wine symlink ==="
+
+          test -L wcp-validation/bin/wine
+
+          WINE_TARGET="$(readlink wcp-validation/bin/wine)"
+
+          echo "Target:"
+          echo "$WINE_TARGET"
+
+          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
+            echo "ERROR: Unexpected packaged bin/wine target:"
+            echo "$WINE_TARGET"
+            exit 1
+          fi
+
+          echo
+          echo "=== Confirm symlink resolves ==="
+
+          test -e wcp-validation/bin/wine
+
+          echo "bin/wine resolves successfully"
+
+          echo
+          echo "=== Confirm executable permissions ==="
+
+          test -x wcp-validation/bin/wine
+          echo "bin/wine executable"
+
+          test -x wcp-validation/bin/wineserver
+          echo "bin/wineserver executable"
+
+          test -x wcp-validation/lib/wine/aarch64-unix/wine
+          echo "Wine target executable"
+
+          echo
+          echo "=== File types ==="
+
+          file wcp-validation/bin/wineserver
+          file wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== Wine-related verbose archive entries ==="
+
+          grep -E \
+            'bin/(wine|wineserver)|lib/wine/aarch64-unix/wine' \
+            wcp-files-long.txt || true
+
+          echo
+          echo "=== Archive statistics ==="
+
+          echo "Total archive entries:"
+          wc -l < wcp-files.txt
+
+          echo
+          echo "Archive disk size:"
+          du -h "$WCP"
+
+          echo
+          echo "=== SHA256 ==="
+
+          sha256sum "$WCP"
+
+          echo
+          echo "=========================================="
+          echo "WCP validation PASSED"
+          echo "=========================================="
+
+      # ------------------------------------------------------------
+      # 8. UPLOAD THE FINISHED WCP
+      # ------------------------------------------------------------
+
+      - name: Upload corrected WCP
         uses: actions/upload-artifact@v4
         with:
-          name: maplestory-proton-11-arm64ec
-          path: proton-11.0-1-arm64ec-maplestory.wcp
+          name: proton-11.0-1.1-arm64ec
+          path: proton-11.0-1.1-arm64ec.wcp
+          if-no-files-found: error
           retention-days: 30
