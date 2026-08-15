@@ -71,7 +71,6 @@ jobs:
             echo "$TYPE"
 
             case "$TYPE" in
-
               *"XZ compressed data"*)
                 echo "Extracting XZ-compressed tar archive..."
                 tar -xJf "$ARCHIVE" -C checkpoint_extracted
@@ -104,18 +103,18 @@ jobs:
                 ;;
             esac
 
-          echo
-          echo "=== Extracted structure ==="
+            echo
+            echo "=== Extracted structure ==="
 
-          find checkpoint_extracted -maxdepth 4 \
-            -printf '%M %s %p\n' \
-            > extracted-structure.txt
+            find checkpoint_extracted -maxdepth 4 \
+              -printf '%M %s %p\n' \
+              > extracted-structure.txt
 
-          sort extracted-structure.txt \
-            > extracted-structure-sorted.txt
+            sort extracted-structure.txt \
+              > extracted-structure-sorted.txt
 
-          head -300 extracted-structure-sorted.txt
-          
+            head -300 extracted-structure-sorted.txt
+
             echo
             echo "=== Searching extracted checkpoint for bin/lib/share ==="
 
@@ -128,7 +127,6 @@ jobs:
                 break
               fi
             done < <(find checkpoint_extracted -type d -name bin)
-
           fi
 
           if [ -z "$ROOT" ]; then
@@ -156,6 +154,7 @@ jobs:
             \( -name 'wine*' -o -name 'wineserver*' \) \
             -printf '%M %s %p -> %l\n' |
             sort
+
       - name: Repair executable permissions
         shell: bash
         run: |
@@ -170,88 +169,6 @@ jobs:
           echo "=== bin contents AFTER repair ==="
           ls -lah "$ROOT/bin"
 
-      - name: Validate Wine launchers
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          WCP="proton-11.0-1-maplestory-arm64ec.wcp"
-
-          rm -rf wcp-validation
-          mkdir -p wcp-validation
-
-          # Generate the archive listing once.
-          tar tJf "$WCP" > wcp-files.txt
-
-          echo "=== Check required Wine entries exist INSIDE archive ==="
-
-          grep -Fxq 'bin/wine' wcp-files.txt
-          echo "FOUND: bin/wine"
-
-          grep -Fxq 'bin/wineserver' wcp-files.txt
-          echo "FOUND: bin/wineserver"
-
-          grep -Fxq 'lib/wine/aarch64-unix/wine' wcp-files.txt
-          echo "FOUND: lib/wine/aarch64-unix/wine"
-
-          echo
-          echo "=== Extract only launcher + target ==="
-
-          tar xJf "$WCP" \
-            -C wcp-validation \
-            bin/wine \
-            bin/wineserver \
-            lib/wine/aarch64-unix/wine
-
-          echo
-          echo "=== Extracted launcher files ==="
-
-          ls -l \
-            wcp-validation/bin/wine \
-            wcp-validation/bin/wineserver \
-            wcp-validation/lib/wine/aarch64-unix/wine
-
-          echo
-          echo "=== bin/wine symlink ==="
-
-          test -L wcp-validation/bin/wine
-
-          WINE_TARGET="$(readlink wcp-validation/bin/wine)"
-
-          echo "Target: $WINE_TARGET"
-
-          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
-            echo "ERROR: Unexpected bin/wine target"
-            exit 1
-          fi
-
-          echo
-          echo "=== Check symlink now resolves ==="
-
-          test -e wcp-validation/bin/wine
-          echo "bin/wine resolves successfully"
-
-          echo
-          echo "=== Check executable permissions ==="
-
-          test -x wcp-validation/bin/wine
-          echo "bin/wine: executable"
-
-          test -x wcp-validation/bin/wineserver
-          echo "bin/wineserver: executable"
-
-          test -x wcp-validation/lib/wine/aarch64-unix/wine
-          echo "Wine target: executable"
-
-          echo
-          echo "=== File types ==="
-
-          file wcp-validation/bin/wineserver
-          file wcp-validation/lib/wine/aarch64-unix/wine
-
-          echo
-          echo "Wine launcher validation PASSED"
-          
       - name: Download ARM64EC prefix
         shell: bash
         run: |
@@ -305,12 +222,93 @@ jobs:
             prefixPack.txz \
             profile.json
 
+          echo "=== Built WCP ==="
+          ls -lh "$GITHUB_WORKSPACE/proton-11.0-1-maplestory-arm64ec.wcp"
+
+      - name: Validate Wine launchers
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          WCP="$GITHUB_WORKSPACE/proton-11.0-1-maplestory-arm64ec.wcp"
+
+          test -f "$WCP"
+
+          rm -rf wcp-validation
+          mkdir -p wcp-validation
+
+          echo "=== Generate archive listing ==="
+          tar tJf "$WCP" > wcp-files.txt
+
+          echo
+          echo "=== Check required Wine entries ==="
+
+          grep -Fxq 'bin/wine' wcp-files.txt
+          echo "FOUND: bin/wine"
+
+          grep -Fxq 'bin/wineserver' wcp-files.txt
+          echo "FOUND: bin/wineserver"
+
+          grep -Fxq 'lib/wine/aarch64-unix/wine' wcp-files.txt
+          echo "FOUND: lib/wine/aarch64-unix/wine"
+
+          echo
+          echo "=== Extract launcher and target ==="
+
+          tar xJf "$WCP" \
+            -C wcp-validation \
+            bin/wine \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== Extracted files ==="
+
+          ls -l \
+            wcp-validation/bin/wine \
+            wcp-validation/bin/wineserver \
+            wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== Validate wine symlink ==="
+
+          test -L wcp-validation/bin/wine
+
+          WINE_TARGET="$(readlink wcp-validation/bin/wine)"
+          echo "Target: $WINE_TARGET"
+
+          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
+            echo "ERROR: Unexpected bin/wine target: $WINE_TARGET"
+            exit 1
+          fi
+
+          test -e wcp-validation/bin/wine
+          echo "bin/wine resolves successfully"
+
+          test -x wcp-validation/bin/wine
+          echo "bin/wine executable"
+
+          test -x wcp-validation/bin/wineserver
+          echo "bin/wineserver executable"
+
+          test -x wcp-validation/lib/wine/aarch64-unix/wine
+          echo "Wine target executable"
+
+          echo
+          echo "=== File types ==="
+
+          file wcp-validation/bin/wineserver
+          file wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "Wine launcher validation PASSED"
+
       - name: Validate final WCP
         shell: bash
         run: |
           set -euxo pipefail
 
-          WCP="proton-11.0-1-maplestory-arm64ec.wcp"
+          WCP="$GITHUB_WORKSPACE/proton-11.0-1-maplestory-arm64ec.wcp"
 
           echo "=== WCP size ==="
           ls -lh "$WCP"
@@ -320,10 +318,7 @@ jobs:
           xz -t "$WCP"
 
           echo
-          echo "=== Generate archive file lists ==="
-
-          # Generate these ONCE instead of repeatedly piping tar into
-          # grep/head. This avoids SIGPIPE failures under pipefail.
+          echo "=== Generate archive lists ==="
           tar tJf "$WCP" > wcp-files.txt
           tar tvJf "$WCP" > wcp-files-long.txt
 
@@ -332,97 +327,26 @@ jobs:
           tar xJOf "$WCP" profile.json
 
           echo
-          echo "=== Required top-level contents ==="
-          grep -E \
-            '^(bin/|lib/|share/|prefixPack\.txz$|profile\.json$)' \
-            wcp-files.txt \
-            > required-paths.txt || true
+          echo "=== Required files ==="
 
-          head -100 required-paths.txt
-
-          echo
-          echo "=== Explicit required-file checks ==="
-
-          grep -Fxq 'bin/wine' wcp-files.txt
-          echo "FOUND: bin/wine"
-
-          grep -Fxq 'bin/wineserver' wcp-files.txt
-          echo "FOUND: bin/wineserver"
-
-          grep -Fxq 'prefixPack.txz' wcp-files.txt
-          echo "FOUND: prefixPack.txz"
-
-          grep -Fxq 'profile.json' wcp-files.txt
-          echo "FOUND: profile.json"
+          for f in \
+            bin/wine \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            prefixPack.txz \
+            profile.json
+          do
+            grep -Fxq "$f" wcp-files.txt
+            echo "FOUND: $f"
+          done
 
           echo
-          echo "=== Wine launchers and permissions inside WCP ==="
+          echo "=== Launcher entries ==="
 
           grep -E \
-            ' bin/(wine|wine64|wineserver)$' \
+            'bin/(wine|wineserver)|lib/wine/aarch64-unix/wine' \
             wcp-files-long.txt || true
 
-          echo
-          echo "=== Validate Wine launchers from extracted WCP ==="
-          
-          rm -rf wcp-validation
-          mkdir -p wcp-validation
-          
-          # bin/ is small enough to extract directly for validation.
-          tar xJf "$WCP" -C wcp-validation bin
-          
-          echo
-          echo "=== Wine-related bin entries ==="
-          ls -lah wcp-validation/bin/wine* || true
-          
-          echo
-          echo "=== bin/wine ==="
-          ls -l wcp-validation/bin/wine
-          
-          if [ -L wcp-validation/bin/wine ]; then
-            echo "bin/wine is a symlink"
-            echo "Target: $(readlink wcp-validation/bin/wine)"
-          else
-            echo "bin/wine is a regular file"
-          fi
-          
-          echo
-          echo "=== bin/wineserver ==="
-          ls -l wcp-validation/bin/wineserver
-          
-          echo
-          echo "=== Check that bin/wine resolves ==="
-          
-          if [ ! -e wcp-validation/bin/wine ]; then
-            echo "ERROR: bin/wine exists as an archive entry but its symlink target is missing/broken."
-            exit 1
-          fi
-          
-          echo "bin/wine resolves successfully"
-          
-          echo
-          echo "=== Check executability ==="
-          
-          if [ ! -x wcp-validation/bin/wine ]; then
-            echo "ERROR: resolved bin/wine is not executable"
-            exit 1
-          fi
-          
-          if [ ! -x wcp-validation/bin/wineserver ]; then
-            echo "ERROR: bin/wineserver is not executable"
-            exit 1
-          fi
-          
-          echo "bin/wine is executable"
-          echo "bin/wineserver is executable"
-          
-          echo
-          echo "=== Resolved wine target ==="
-          readlink -f wcp-validation/bin/wine || true
-          file "$(readlink -f wcp-validation/bin/wine)"
-          
-          echo
-          echo "Wine launcher validation PASSED"
           echo
           echo "=== Archive statistics ==="
           echo "Total entries: $(wc -l < wcp-files.txt)"
@@ -430,7 +354,7 @@ jobs:
 
           echo
           echo "WCP validation PASSED"
-          
+
       - name: Upload corrected WCP
         uses: actions/upload-artifact@v4
         with:
