@@ -44,6 +44,7 @@ jobs:
           set -euxo pipefail
 
           echo "=== Everything downloaded ==="
+
           find checkpoint -maxdepth 3 \
             -printf '%M %s %p\n' \
             > checkpoint-contents.txt
@@ -64,7 +65,6 @@ jobs:
 
           ROOT=""
 
-          # The artifact may already directly contain bin/lib/share.
           if [ -d "checkpoint/bin" ] &&
              [ -d "checkpoint/lib" ] &&
              [ -d "checkpoint/share" ]; then
@@ -200,7 +200,7 @@ jobs:
           sort wine-bin-files.txt
 
       # ------------------------------------------------------------
-      # 3. VALIDATE AND REPAIR THE CHECKPOINT'S WINE LAUNCHER
+      # 3. VALIDATE / RESTORE EXECUTABLE PERMISSIONS
       # ------------------------------------------------------------
 
       - name: Validate checkpoint Wine runtime
@@ -247,7 +247,6 @@ jobs:
           chmod 755 "$ROOT/lib/wine/aarch64-unix/wine"
           chmod 755 "$ROOT/bin/wineserver"
 
-          # If any other regular Wine launcher files exist, make them executable.
           find "$ROOT/bin" \
             -maxdepth 1 \
             -type f \
@@ -282,30 +281,40 @@ jobs:
           echo "Checkpoint Wine runtime validation PASSED"
 
       # ------------------------------------------------------------
-      # 4. GET GAMENATIVE ARM64EC PREFIX
+      # 4. DOWNLOAD THE PROTON 11-SPECIFIC ARM64EC PREFIX
+      #
+      # IMPORTANT:
+      # This intentionally uses prefixPack-arm64ec-11.txz,
+      # NOT the generic prefixPack-arm64ec.txz.
       # ------------------------------------------------------------
 
-      - name: Download ARM64EC prefix
+      - name: Download GameNative Proton 11 ARM64EC prefix
         shell: bash
         run: |
           set -euxo pipefail
 
           wget \
-            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec.txz \
+            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec-11.txz \
             -O prefixPack.txz
 
           test -s prefixPack.txz
 
-          echo "=== Prefix downloaded ==="
+          echo
+          echo "=== Prefix pack ==="
+
           ls -lh prefixPack.txz
+          file prefixPack.txz
+
+          echo
+          echo "=== Prefix SHA256 ==="
+
+          sha256sum prefixPack.txz
 
       # ------------------------------------------------------------
-      # 5. CREATE A GAMENATIVE-COMPATIBLE PROFILE
+      # 5. CREATE GAMENATIVE-COMPATIBLE PROFILE
       #
-      # IMPORTANT:
-      # Do NOT put "maplestory" or any other word in versionName.
-      #
-      # GameNative must see a normal numeric ARM64EC Proton identifier.
+      # Keep versionName numeric.
+      # Do NOT add "maplestory" to versionName.
       # ------------------------------------------------------------
 
       - name: Generate GameNative Proton profile
@@ -329,17 +338,20 @@ jobs:
           EOF
 
           echo "=== Generated profile ==="
+
           cat profile.json
 
           echo
           echo "=== Confirm safe versionName ==="
 
-          grep -Fq '"versionName": "11.0-1.1-arm64ec"' profile.json
+          grep -Fq \
+            '"versionName": "11.0-1.1-arm64ec"' \
+            profile.json
 
           echo "Profile versionName is correct."
 
       # ------------------------------------------------------------
-      # 6. BUILD THE NEW WCP
+      # 6. BUILD THE WCP
       # ------------------------------------------------------------
 
       - name: Build WCP
@@ -383,7 +395,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
       # ------------------------------------------------------------
-      # 7. VALIDATE THE ACTUAL FINISHED WCP
+      # 7. VALIDATE THE FINISHED WCP
       # ------------------------------------------------------------
 
       - name: Validate final WCP
@@ -522,6 +534,13 @@ jobs:
             wcp-files-long.txt || true
 
           echo
+          echo "=== Verify packaged prefix exists ==="
+
+          grep -Fxq 'prefixPack.txz' wcp-files.txt
+
+          echo "prefixPack.txz present"
+
+          echo
           echo "=== Archive statistics ==="
 
           echo "Total archive entries:"
@@ -532,7 +551,7 @@ jobs:
           du -h "$WCP"
 
           echo
-          echo "=== SHA256 ==="
+          echo "=== WCP SHA256 ==="
 
           sha256sum "$WCP"
 
