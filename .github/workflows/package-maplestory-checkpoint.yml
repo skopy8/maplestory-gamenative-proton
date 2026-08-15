@@ -325,24 +325,66 @@ jobs:
             wcp-files-long.txt || true
 
           echo
-          echo "=== Confirm wine executable bit ==="
-
-          WINE_MODE="$(awk '$NF == "bin/wine" {print $1}' wcp-files-long.txt)"
-          WINESERVER_MODE="$(awk '$NF == "bin/wineserver" {print $1}' wcp-files-long.txt)"
-
-          echo "bin/wine mode:       $WINE_MODE"
-          echo "bin/wineserver mode: $WINESERVER_MODE"
-
-          if [[ "$WINE_MODE" != *x* ]]; then
-            echo "ERROR: bin/wine is not executable inside WCP"
+          echo "=== Validate Wine launchers from extracted WCP ==="
+          
+          rm -rf wcp-validation
+          mkdir -p wcp-validation
+          
+          # bin/ is small enough to extract directly for validation.
+          tar xJf "$WCP" -C wcp-validation bin
+          
+          echo
+          echo "=== Wine-related bin entries ==="
+          ls -lah wcp-validation/bin/wine* || true
+          
+          echo
+          echo "=== bin/wine ==="
+          ls -l wcp-validation/bin/wine
+          
+          if [ -L wcp-validation/bin/wine ]; then
+            echo "bin/wine is a symlink"
+            echo "Target: $(readlink wcp-validation/bin/wine)"
+          else
+            echo "bin/wine is a regular file"
+          fi
+          
+          echo
+          echo "=== bin/wineserver ==="
+          ls -l wcp-validation/bin/wineserver
+          
+          echo
+          echo "=== Check that bin/wine resolves ==="
+          
+          if [ ! -e wcp-validation/bin/wine ]; then
+            echo "ERROR: bin/wine exists as an archive entry but its symlink target is missing/broken."
             exit 1
           fi
-
-          if [[ "$WINESERVER_MODE" != *x* ]]; then
-            echo "ERROR: bin/wineserver is not executable inside WCP"
+          
+          echo "bin/wine resolves successfully"
+          
+          echo
+          echo "=== Check executability ==="
+          
+          if [ ! -x wcp-validation/bin/wine ]; then
+            echo "ERROR: resolved bin/wine is not executable"
             exit 1
           fi
-
+          
+          if [ ! -x wcp-validation/bin/wineserver ]; then
+            echo "ERROR: bin/wineserver is not executable"
+            exit 1
+          fi
+          
+          echo "bin/wine is executable"
+          echo "bin/wineserver is executable"
+          
+          echo
+          echo "=== Resolved wine target ==="
+          readlink -f wcp-validation/bin/wine || true
+          file "$(readlink -f wcp-validation/bin/wine)"
+          
+          echo
+          echo "Wine launcher validation PASSED"
           echo
           echo "=== Archive statistics ==="
           echo "Total entries: $(wc -l < wcp-files.txt)"
