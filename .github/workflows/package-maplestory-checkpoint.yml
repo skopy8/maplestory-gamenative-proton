@@ -1,10 +1,10 @@
-name: Package MapleStory ARM64EC Checkpoint
+name: Package MapleStory ARM64EC Registry Test
 
 on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: "Workflow run ID containing compiled-proton-arm64ec-checkpoint"
+        description: "Original workflow run ID containing compiled-proton-arm64ec-checkpoint"
         required: true
         type: string
 
@@ -17,13 +17,13 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-1.1-arm64ec"
-      WCP_NAME: "proton-11.0-1.1-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-1.2-arm64ec"
+      WCP_NAME: "proton-11.0-1.2-arm64ec.wcp"
 
     steps:
-      # ------------------------------------------------------------
-      # 1. DOWNLOAD THE ALREADY-COMPILED CHECKPOINT
-      # ------------------------------------------------------------
+      # ============================================================
+      # 1. DOWNLOAD OUR ALREADY-COMPILED PATCHED PROTON
+      # ============================================================
 
       - name: Download compiled ARM64EC checkpoint
         uses: actions/download-artifact@v4
@@ -34,174 +34,51 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      # ------------------------------------------------------------
-      # 2. EXTRACT CHECKPOINT AND FIND bin/lib/share ROOT
-      # ------------------------------------------------------------
+      # ============================================================
+      # 2. RESTORE COMPILED PROTON
+      #
+      # The original checkpoint was deliberately wrapped in a tar
+      # so executable permissions and symlinks survive GitHub
+      # Actions artifact storage.
+      # ============================================================
 
-      - name: Inspect and extract checkpoint
+      - name: Restore compiled Proton checkpoint
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "=== Everything downloaded ==="
+          CHECKPOINT="checkpoint/compiled-proton-checkpoint.tar"
 
-          find checkpoint -maxdepth 3 \
-            -printf '%M %s %p\n' \
-            > checkpoint-contents.txt
+          echo "=== Checkpoint artifact ==="
+          ls -lh checkpoint
 
-          sort checkpoint-contents.txt \
-            > checkpoint-contents-sorted.txt
+          test -f "$CHECKPOINT"
 
-          cat checkpoint-contents-sorted.txt
+          rm -rf checkpoint_extracted
+          mkdir -p checkpoint_extracted
 
-          echo
-          echo "=== File types ==="
+          tar -xf "$CHECKPOINT" \
+            -C checkpoint_extracted
 
-          find checkpoint -type f -print0 |
-          while IFS= read -r -d '' f; do
-            echo "---- $f"
-            file "$f"
-          done
+          ROOT="$GITHUB_WORKSPACE/checkpoint_extracted"
 
-          ROOT=""
-
-          if [ -d "checkpoint/bin" ] &&
-             [ -d "checkpoint/lib" ] &&
-             [ -d "checkpoint/share" ]; then
-
-            ROOT="$GITHUB_WORKSPACE/checkpoint"
-
-          else
-            mkdir -p checkpoint_extracted
-
-            echo
-            echo "=== Looking for archive inside artifact ==="
-
-            ARCHIVE=""
-
-            while IFS= read -r candidate; do
-              ARCHIVE="$candidate"
-              break
-            done < <(find checkpoint -type f -print)
-
-            if [ -z "$ARCHIVE" ]; then
-              echo "ERROR: Artifact contains no files."
-              exit 1
-            fi
-
-            echo "Candidate archive:"
-            echo "$ARCHIVE"
-
-            TYPE="$(file -b "$ARCHIVE")"
-
-            echo "Detected type:"
-            echo "$TYPE"
-
-            case "$TYPE" in
-              *"XZ compressed data"*)
-                echo "Extracting XZ-compressed archive..."
-                tar -xJf "$ARCHIVE" -C checkpoint_extracted
-                ;;
-
-              *"Zstandard compressed data"*)
-                echo "Extracting Zstandard-compressed archive..."
-                tar --zstd -xf "$ARCHIVE" -C checkpoint_extracted
-                ;;
-
-              *"gzip compressed data"*)
-                echo "Extracting gzip-compressed archive..."
-                tar -xzf "$ARCHIVE" -C checkpoint_extracted
-                ;;
-
-              *"tar archive"*)
-                echo "Extracting tar archive..."
-                tar -xf "$ARCHIVE" -C checkpoint_extracted
-                ;;
-
-              *"Zip archive data"*)
-                echo "Extracting ZIP archive..."
-                unzip -q "$ARCHIVE" -d checkpoint_extracted
-                ;;
-
-              *)
-                echo "ERROR: Unknown checkpoint archive type:"
-                echo "$TYPE"
-                exit 1
-                ;;
-            esac
-
-            echo
-            echo "=== Extracted structure ==="
-
-            find checkpoint_extracted -maxdepth 4 \
-              -printf '%M %s %p\n' \
-              > extracted-structure.txt
-
-            sort extracted-structure.txt \
-              > extracted-structure-sorted.txt
-
-            sed -n '1,300p' extracted-structure-sorted.txt
-
-            echo
-            echo "=== Searching for bin/lib/share root ==="
-
-            if [ -d "checkpoint_extracted/bin" ] &&
-               [ -d "checkpoint_extracted/lib" ] &&
-               [ -d "checkpoint_extracted/share" ]; then
-
-              ROOT="$GITHUB_WORKSPACE/checkpoint_extracted"
-
-            else
-              while IFS= read -r bindir; do
-                candidate="$(dirname "$bindir")"
-
-                if [ -d "$candidate/lib" ] &&
-                   [ -d "$candidate/share" ]; then
-
-                  ROOT="$GITHUB_WORKSPACE/$candidate"
-                  break
-                fi
-
-              done < <(find checkpoint_extracted -type d -name bin -print)
-            fi
-          fi
-
-          if [ -z "$ROOT" ]; then
-            echo
-            echo "ERROR: Could not locate checkpoint root containing:"
-            echo "  bin/"
-            echo "  lib/"
-            echo "  share/"
-            exit 1
-          fi
-
-          echo
-          echo "=== FOUND CHECKPOINT ROOT ==="
-          echo "$ROOT"
+          test -d "$ROOT/bin"
+          test -d "$ROOT/lib"
+          test -d "$ROOT/share"
 
           echo "CHECKPOINT_ROOT=$ROOT" >> "$GITHUB_ENV"
 
           echo
-          echo "=== Top-level checkpoint contents ==="
+          echo "=== Restored Proton root ==="
           ls -lah "$ROOT"
 
           echo
-          echo "=== Wine bin directory ==="
+          echo "=== Wine launchers ==="
           ls -lah "$ROOT/bin"
 
-          echo
-          echo "=== Wine-related bin entries ==="
-
-          find "$ROOT/bin" -maxdepth 1 \
-            \( -name 'wine*' -o -name 'wineserver*' \) \
-            -printf '%M %s %p -> %l\n' \
-            > wine-bin-files.txt
-
-          sort wine-bin-files.txt
-
-      # ------------------------------------------------------------
-      # 3. VALIDATE / RESTORE EXECUTABLE PERMISSIONS
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. VALIDATE / RESTORE THE WINE LAUNCHER
+      # ============================================================
 
       - name: Validate checkpoint Wine runtime
         shell: bash
@@ -210,40 +87,23 @@ jobs:
 
           ROOT="$CHECKPOINT_ROOT"
 
-          echo "=== Validate bin/wine ==="
+          echo "=== bin/wine ==="
 
           test -L "$ROOT/bin/wine"
 
           WINE_TARGET="$(readlink "$ROOT/bin/wine")"
 
-          echo "bin/wine target:"
-          echo "$WINE_TARGET"
+          echo "Target: $WINE_TARGET"
 
           if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
-            echo "ERROR: Unexpected bin/wine target:"
-            echo "$WINE_TARGET"
+            echo "ERROR: Unexpected bin/wine target"
             exit 1
           fi
 
-          echo
-          echo "=== Validate Wine target ==="
-
           test -f "$ROOT/lib/wine/aarch64-unix/wine"
-
-          echo "FOUND:"
-          ls -l "$ROOT/lib/wine/aarch64-unix/wine"
-
-          echo
-          echo "=== Validate wineserver ==="
-
           test -f "$ROOT/bin/wineserver"
 
-          echo "FOUND:"
-          ls -l "$ROOT/bin/wineserver"
-
-          echo
-          echo "=== Restore required executable permissions ==="
-
+          # Restore executable bits just in case.
           chmod 755 "$ROOT/lib/wine/aarch64-unix/wine"
           chmod 755 "$ROOT/bin/wineserver"
 
@@ -253,24 +113,13 @@ jobs:
             -name 'wine*' \
             -exec chmod 755 {} \;
 
-          echo
-          echo "=== Validate resolved bin/wine ==="
-
           test -e "$ROOT/bin/wine"
           test -x "$ROOT/bin/wine"
-
-          echo "bin/wine resolves successfully."
-
-          echo
-          echo "Resolved target:"
-          readlink -f "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wineserver"
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
 
           echo
-          echo "File type:"
-          file "$(readlink -f "$ROOT/bin/wine")"
-
-          echo
-          echo "=== Final runtime permissions ==="
+          echo "=== Runtime files ==="
 
           ls -l \
             "$ROOT/bin/wine" \
@@ -280,13 +129,13 @@ jobs:
           echo
           echo "Checkpoint Wine runtime validation PASSED"
 
-      # ------------------------------------------------------------
-      # 4. DOWNLOAD THE PROTON 11-SPECIFIC ARM64EC PREFIX
+      # ============================================================
+      # 4. DOWNLOAD THE CORRECT PROTON 11 ARM64EC PREFIX
       #
       # IMPORTANT:
-      # This intentionally uses prefixPack-arm64ec-11.txz,
-      # NOT the generic prefixPack-arm64ec.txz.
-      # ------------------------------------------------------------
+      # Use prefixPack-arm64ec-11.txz.
+      # Do NOT use the generic prefixPack-arm64ec.txz.
+      # ============================================================
 
       - name: Download GameNative Proton 11 ARM64EC prefix
         shell: bash
@@ -295,27 +144,455 @@ jobs:
 
           wget \
             https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-arm64ec-11.txz \
-            -O prefixPack.txz
+            -O prefixPack-base.txz
+
+          test -s prefixPack-base.txz
+
+          echo
+          echo "=== Base prefix pack ==="
+
+          ls -lh prefixPack-base.txz
+          file prefixPack-base.txz
+          sha256sum prefixPack-base.txz
+
+      # ============================================================
+      # 5. APPLY ONLY THE MAPLESTORY REGISTRY FIXES
+      #
+      # This is our controlled 1.2 experiment:
+      #
+      #   1.1 = Wine source patches only
+      #   1.2 = same Wine binaries + registry fixes
+      #
+      # NO VC runtime addition here.
+      # NO Wine rebuild here.
+      # ============================================================
+
+      - name: Patch MapleStory registry settings into prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf prefix_work
+          mkdir -p prefix_work
+
+          tar -xJf prefixPack-base.txz \
+            -C prefix_work
+
+          echo "=== Prefix structure ==="
+
+          find prefix_work \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            > prefix-files-before.txt
+
+          sed -n '1,150p' prefix-files-before.txt
+
+          USER_REG="$(find prefix_work -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find prefix_work -type f -name system.reg -print -quit)"
+          USERDEF_REG="$(find prefix_work -type f -name userdef.reg -print -quit || true)"
+
+          if [ -z "$USER_REG" ]; then
+            echo "ERROR: user.reg not found in prefix."
+            exit 1
+          fi
+
+          if [ -z "$SYSTEM_REG" ]; then
+            echo "ERROR: system.reg not found in prefix."
+            exit 1
+          fi
+
+          echo
+          echo "=== Registry hives ==="
+
+          echo "user.reg:    $USER_REG"
+          echo "system.reg:  $SYSTEM_REG"
+          echo "userdef.reg: ${USERDEF_REG:-not present}"
+
+          python3 - \
+            "$USER_REG" \
+            "$SYSTEM_REG" \
+            "${USERDEF_REG:-}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          system_reg = Path(sys.argv[2])
+          userdef_arg = sys.argv[3]
+          userdef_reg = Path(userdef_arg) if userdef_arg else None
+
+
+          def string_value(value):
+              value = value.replace("\\", "\\\\")
+              value = value.replace('"', '\\"')
+              return f'"{value}"'
+
+
+          def value_name(name):
+              if name is None:
+                  return "@"
+
+              escaped = name.replace("\\", "\\\\")
+              escaped = escaped.replace('"', '\\"')
+
+              return f'"{escaped}"'
+
+
+          def render(name, kind, value):
+              prefix = value_name(name) + "="
+
+              if kind == "str":
+                  return prefix + string_value(value)
+
+              if kind == "dword":
+                  return prefix + f"dword:{value:08x}"
+
+              raise ValueError(f"Unknown value type: {kind}")
+
+
+          # Wine's internal registry-file format is similar to REGEDIT.
+          # These paths are relative to HKCU inside user.reg.
+
+          USER_PATCHES = {
+              r"Software\\Wine\\X11 Driver": {
+                  "UseTakeFocus": ("str", "N"),
+                  "Grab": ("str", "N"),
+                  "GrabFullscreen": ("str", "N"),
+                  "UseLinuxInputEvents": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\DirectInput": {
+                  "UseLinuxInputEvents": ("str", "Y"),
+                  "KeyboardUseNonExclusive": ("str", "Y"),
+                  "MouseUseNonExclusive": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\MapleStory.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\nxsteam.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\SteamConnectorHelper.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Nexon Launcher": {
+                  "Install Directory": ("str", r"C:\Nexon\Launcher"),
+                  "Region": ("str", "1"),
+                  "User Data": (
+                      "str",
+                      '{"setup-id":"372e7640-20f4-419c-ada0-4ad0d76c33d9","time":1748271149}',
+                  ),
+              },
+
+              r"Software\\Wine\\Direct3D": {
+                  "cb_access_map_w": ("dword", 1),
+                  "CSMT": ("str", "disabled"),
+              },
+          }
+
+
+          # These paths are relative to HKLM inside system.reg.
+
+          SYSTEM_PATCHES = {
+              r"Software\\Classes\\Applications\\nexon_launcher.exe\\shell\\open": {
+                  "FriendlyAppName": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl": {
+                  None: ("str", "URL:nxl protocol"),
+                  "URL Protocol": ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\DefaultIcon": {
+                  None: ("str", r"C:\Nexon\Launcher\nexon_launcher.exe"),
+              },
+
+              r"Software\\Classes\\nxl\\shell": {
+                  None: ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open": {
+                  None: ("str", ""),
+                  "Friendly App Name": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open\\command": {
+                  None: (
+                      "str",
+                      r'"C:\Nexon\Launcher\nexon_launcher.exe" "%1"',
+                  ),
+              },
+
+              r"Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nexon Nexon Launcher": {
+                  "DisplayIcon": (
+                      "str",
+                      r'"C:\Nexon\Launcher\logo.ico"',
+                  ),
+                  "DisplayName": (
+                      "str",
+                      "Nexon Launcher",
+                  ),
+                  "DisplayVersion": (
+                      "str",
+                      "2.3.0",
+                  ),
+                  "EstimatedSize": (
+                      "dword",
+                      0x2B48,
+                  ),
+                  "HelpLink": (
+                      "str",
+                      r'"http://www.nexon.net/legal/terms-of-use/"',
+                  ),
+                  "InstallLocation": (
+                      "str",
+                      r'"C:\Nexon\Launcher"',
+                  ),
+                  "NoModify": (
+                      "dword",
+                      1,
+                  ),
+                  "NoRepair": (
+                      "dword",
+                      1,
+                  ),
+                  "Publisher": (
+                      "str",
+                      "Nexon",
+                  ),
+                  "QuietUninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe" /S',
+                  ),
+                  "UninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe"',
+                  ),
+                  "URLInfoAbout": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "URLUpdateInfo": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "VersionMajor": (
+                      "dword",
+                      2,
+                  ),
+                  "VersionMinor": (
+                      "dword",
+                      3,
+                  ),
+              },
+          }
+
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+
+          def find_section(lines, section):
+              for index, line in enumerate(lines):
+                  match = section_re.match(line)
+
+                  if match and match.group(1) == section:
+                      start = index
+
+                      end = len(lines)
+
+                      for next_index in range(index + 1, len(lines)):
+                          if section_re.match(lines[next_index]):
+                              end = next_index
+                              break
+
+                      return start, end
+
+              return None
+
+
+          def patch_hive(path, patches):
+              print(f"Patching {path}")
+
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              lines = text.splitlines()
+
+              for section, values in patches.items():
+
+                  current = find_section(lines, section)
+
+                  if current is None:
+                      if lines and lines[-1] != "":
+                          lines.append("")
+
+                      # Modification time is optional in Wine registry v2.
+                      lines.append(f"[{section}]")
+
+                      for name, (kind, value) in values.items():
+                          lines.append(
+                              render(
+                                  name,
+                                  kind,
+                                  value,
+                              )
+                          )
+
+                      continue
+
+                  for name, (kind, value) in values.items():
+
+                      desired = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      token = value_name(name) + "="
+
+                      start, end = find_section(
+                          lines,
+                          section,
+                      )
+
+                      replaced = False
+
+                      for line_index in range(
+                          start + 1,
+                          end,
+                      ):
+                          if lines[line_index].startswith(token):
+                              lines[line_index] = desired
+                              replaced = True
+                              break
+
+                      if not replaced:
+                          lines.insert(
+                              end,
+                              desired,
+                          )
+
+              path.write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8",
+              )
+
+
+          def verify_hive(path, patches):
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              for section, values in patches.items():
+
+                  if f"[{section}]" not in text:
+                      # Existing Wine-generated sections may include
+                      # modification timestamps after the closing bracket.
+                      section_found = False
+
+                      for line in text.splitlines():
+                          match = section_re.match(line)
+
+                          if match and match.group(1) == section:
+                              section_found = True
+                              break
+
+                      if not section_found:
+                          raise RuntimeError(
+                              f"Missing registry section {section} in {path}"
+                          )
+
+                  for name, (kind, value) in values.items():
+                      wanted = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      if wanted not in text:
+                          raise RuntimeError(
+                              f"Missing registry value {wanted} in {path}"
+                          )
+
+              print(f"Verified {path}")
+
+
+          patch_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          patch_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          # Keep default-user settings consistent if this hive exists.
+          if userdef_reg and userdef_reg.exists():
+              patch_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          verify_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          verify_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          if userdef_reg and userdef_reg.exists():
+              verify_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          print()
+          print("MapleStory registry patch validation PASSED")
+          PY
+
+          echo
+          echo "=== Repacking modified prefix ==="
+
+          tar cJf prefixPack.txz \
+            -C prefix_work \
+            .
 
           test -s prefixPack.txz
 
           echo
-          echo "=== Prefix pack ==="
+          echo "=== Modified prefix pack ==="
 
           ls -lh prefixPack.txz
-          file prefixPack.txz
-
-          echo
-          echo "=== Prefix SHA256 ==="
-
           sha256sum prefixPack.txz
 
-      # ------------------------------------------------------------
-      # 5. CREATE GAMENATIVE-COMPATIBLE PROFILE
-      #
-      # Keep versionName numeric.
-      # Do NOT add "maplestory" to versionName.
-      # ------------------------------------------------------------
+          echo
+          echo "=== Modified prefix contents ==="
+
+          tar tJf prefixPack.txz \
+            > modified-prefix-files.txt
+
+          grep -E \
+            '(^|/)(user|userdef|system)\.reg$' \
+            modified-prefix-files.txt
+
+          echo
+          echo "Prefix registry patch PASSED"
+
+      # ============================================================
+      # 6. CREATE NEW 1.2 GAMENATIVE PROFILE
+      # ============================================================
 
       - name: Generate GameNative Proton profile
         shell: bash
@@ -325,9 +602,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1.1-arm64ec",
+            "versionName": "11.0-1.2-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11.0-1 ARM64EC with MapleStory SPI and CharPrev compatibility patches",
+            "description": "Proton 11 ARM64EC - MapleStory Wine source patches plus registry fixes",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -341,18 +618,16 @@ jobs:
 
           cat profile.json
 
-          echo
-          echo "=== Confirm safe versionName ==="
-
           grep -Fq \
-            '"versionName": "11.0-1.1-arm64ec"' \
+            '"versionName": "11.0-1.2-arm64ec"' \
             profile.json
 
-          echo "Profile versionName is correct."
+          echo
+          echo "Profile validation PASSED"
 
-      # ------------------------------------------------------------
-      # 6. BUILD THE WCP
-      # ------------------------------------------------------------
+      # ============================================================
+      # 7. BUILD THE NEW WCP
+      # ============================================================
 
       - name: Build WCP
         shell: bash
@@ -361,13 +636,12 @@ jobs:
 
           ROOT="$CHECKPOINT_ROOT"
 
-          cp prefixPack.txz "$ROOT/prefixPack.txz"
-          cp profile.json "$ROOT/profile.json"
+          cp prefixPack.txz \
+            "$ROOT/prefixPack.txz"
 
-          echo "=== Packaging from ==="
-          echo "$ROOT"
+          cp profile.json \
+            "$ROOT/profile.json"
 
-          echo
           echo "=== Package inputs ==="
 
           ls -ld \
@@ -394,9 +668,9 @@ jobs:
 
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
-      # ------------------------------------------------------------
-      # 7. VALIDATE THE FINISHED WCP
-      # ------------------------------------------------------------
+      # ============================================================
+      # 8. VALIDATE FINAL WCP
+      # ============================================================
 
       - name: Validate final WCP
         shell: bash
@@ -405,28 +679,24 @@ jobs:
 
           WCP="$GITHUB_WORKSPACE/$WCP_NAME"
 
-          echo "=== Confirm WCP exists ==="
-
           test -f "$WCP"
           test -s "$WCP"
 
+          echo "=== WCP ==="
           ls -lh "$WCP"
 
           echo
-          echo "=== Test XZ integrity ==="
+          echo "=== XZ integrity ==="
 
           xz -t "$WCP"
 
           echo "XZ integrity PASSED"
 
           echo
-          echo "=== Generate archive lists ==="
+          echo "=== Archive listing ==="
 
-          tar tJf "$WCP" > wcp-files.txt
-          tar tvJf "$WCP" > wcp-files-long.txt
-
-          echo
-          echo "=== Required archive entries ==="
+          tar tJf "$WCP" \
+            > wcp-files.txt
 
           for f in \
             bin/wine \
@@ -439,119 +709,109 @@ jobs:
             echo "FOUND: $f"
           done
 
-          grep -Fxq 'bin/' wcp-files.txt
-          echo "FOUND: bin/"
-
-          grep -Fxq 'lib/' wcp-files.txt
-          echo "FOUND: lib/"
-
-          grep -Fxq 'share/' wcp-files.txt
-          echo "FOUND: share/"
-
           echo
-          echo "=== Profile stored inside WCP ==="
+          echo "=== Packaged profile ==="
 
-          tar xJOf "$WCP" profile.json \
+          tar xJOf \
+            "$WCP" \
+            profile.json \
             > packaged-profile.json
 
           cat packaged-profile.json
 
-          echo
-          echo "=== Validate packaged versionName ==="
-
           grep -Fq \
-            '"versionName": "11.0-1.1-arm64ec"' \
+            '"versionName": "11.0-1.2-arm64ec"' \
             packaged-profile.json
 
-          echo "Packaged profile versionName PASSED"
-
           echo
-          echo "=== Extract Wine launcher AND its target ==="
+          echo "=== Validate Wine launcher chain ==="
 
-          rm -rf wcp-validation
-          mkdir -p wcp-validation
+          rm -rf wcp_validation
+          mkdir -p wcp_validation
 
           tar xJf "$WCP" \
-            -C wcp-validation \
+            -C wcp_validation \
             bin/wine \
             bin/wineserver \
             lib/wine/aarch64-unix/wine
 
-          echo
-          echo "=== Extracted launcher files ==="
+          test -L \
+            wcp_validation/bin/wine
 
-          ls -l \
-            wcp-validation/bin/wine \
-            wcp-validation/bin/wineserver \
-            wcp-validation/lib/wine/aarch64-unix/wine
+          test -e \
+            wcp_validation/bin/wine
 
-          echo
-          echo "=== Validate bin/wine symlink ==="
+          test -x \
+            wcp_validation/bin/wine
 
-          test -L wcp-validation/bin/wine
+          test -x \
+            wcp_validation/bin/wineserver
 
-          WINE_TARGET="$(readlink wcp-validation/bin/wine)"
+          test -x \
+            wcp_validation/lib/wine/aarch64-unix/wine
 
-          echo "Target:"
-          echo "$WINE_TARGET"
-
-          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
-            echo "ERROR: Unexpected packaged bin/wine target:"
-            echo "$WINE_TARGET"
-            exit 1
-          fi
+          echo "Wine launcher validation PASSED"
 
           echo
-          echo "=== Confirm symlink resolves ==="
+          echo "=== Validate patched prefix inside final WCP ==="
 
-          test -e wcp-validation/bin/wine
+          tar xJOf \
+            "$WCP" \
+            prefixPack.txz \
+            > packaged-prefix.txz
 
-          echo "bin/wine resolves successfully"
+          rm -rf packaged_prefix
+          mkdir -p packaged_prefix
+
+          tar xJf packaged-prefix.txz \
+            -C packaged_prefix
+
+          USER_REG="$(find packaged_prefix -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find packaged_prefix -type f -name system.reg -print -quit)"
+
+          test -n "$USER_REG"
+          test -n "$SYSTEM_REG"
+
+          echo "user.reg:   $USER_REG"
+          echo "system.reg: $SYSTEM_REG"
+
+          grep -Fq \
+            '"UseTakeFocus"="N"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"UseLinuxInputEvents"="Y"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"KeyboardUseNonExclusive"="Y"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"MouseUseNonExclusive"="Y"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"Version"="win10"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"cb_access_map_w"=dword:00000001' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"CSMT"="disabled"' \
+            "$USER_REG"
+
+          grep -Fq \
+            '"URL Protocol"=""' \
+            "$SYSTEM_REG"
 
           echo
-          echo "=== Confirm executable permissions ==="
-
-          test -x wcp-validation/bin/wine
-          echo "bin/wine executable"
-
-          test -x wcp-validation/bin/wineserver
-          echo "bin/wineserver executable"
-
-          test -x wcp-validation/lib/wine/aarch64-unix/wine
-          echo "Wine target executable"
+          echo "Packaged MapleStory registry validation PASSED"
 
           echo
-          echo "=== File types ==="
-
-          file wcp-validation/bin/wineserver
-          file wcp-validation/lib/wine/aarch64-unix/wine
-
-          echo
-          echo "=== Wine-related verbose archive entries ==="
-
-          grep -E \
-            'bin/(wine|wineserver)|lib/wine/aarch64-unix/wine' \
-            wcp-files-long.txt || true
-
-          echo
-          echo "=== Verify packaged prefix exists ==="
-
-          grep -Fxq 'prefixPack.txz' wcp-files.txt
-
-          echo "prefixPack.txz present"
-
-          echo
-          echo "=== Archive statistics ==="
-
-          echo "Total archive entries:"
-          wc -l < wcp-files.txt
-
-          echo
-          echo "Archive disk size:"
-          du -h "$WCP"
-
-          echo
-          echo "=== WCP SHA256 ==="
+          echo "=== Final SHA256 ==="
 
           sha256sum "$WCP"
 
@@ -560,14 +820,14 @@ jobs:
           echo "WCP validation PASSED"
           echo "=========================================="
 
-      # ------------------------------------------------------------
-      # 8. UPLOAD THE FINISHED WCP
-      # ------------------------------------------------------------
+      # ============================================================
+      # 9. UPLOAD 1.2 WCP
+      # ============================================================
 
-      - name: Upload corrected WCP
+      - name: Upload MapleStory registry-test WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-1.1-arm64ec
-          path: proton-11.0-1.1-arm64ec.wcp
+          name: proton-11.0-1.2-arm64ec
+          path: proton-11.0-1.2-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
