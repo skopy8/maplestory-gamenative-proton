@@ -175,45 +175,83 @@ jobs:
         run: |
           set -euxo pipefail
 
-          ROOT="$CHECKPOINT_ROOT"
+          WCP="proton-11.0-1-maplestory-arm64ec.wcp"
 
-          echo "=== Wine launcher validation ==="
+          rm -rf wcp-validation
+          mkdir -p wcp-validation
 
-          test -e "$ROOT/bin/wine"
-          test -e "$ROOT/bin/wineserver"
+          # Generate the archive listing once.
+          tar tJf "$WCP" > wcp-files.txt
 
-          test -x "$ROOT/bin/wine"
-          test -x "$ROOT/bin/wineserver"
+          echo "=== Check required Wine entries exist INSIDE archive ==="
 
-          ls -l "$ROOT/bin/wine"
-          ls -l "$ROOT/bin/wineserver"
+          grep -Fxq 'bin/wine' wcp-files.txt
+          echo "FOUND: bin/wine"
+
+          grep -Fxq 'bin/wineserver' wcp-files.txt
+          echo "FOUND: bin/wineserver"
+
+          grep -Fxq 'lib/wine/aarch64-unix/wine' wcp-files.txt
+          echo "FOUND: lib/wine/aarch64-unix/wine"
 
           echo
-          file "$ROOT/bin/wine"
-          file "$ROOT/bin/wineserver"
+          echo "=== Extract only launcher + target ==="
+
+          tar xJf "$WCP" \
+            -C wcp-validation \
+            bin/wine \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine
 
           echo
-          echo "wine symlink status:"
-          if [ -L "$ROOT/bin/wine" ]; then
-            readlink "$ROOT/bin/wine"
-            readlink -f "$ROOT/bin/wine"
-          else
-            echo "bin/wine is a regular file"
+          echo "=== Extracted launcher files ==="
+
+          ls -l \
+            wcp-validation/bin/wine \
+            wcp-validation/bin/wineserver \
+            wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "=== bin/wine symlink ==="
+
+          test -L wcp-validation/bin/wine
+
+          WINE_TARGET="$(readlink wcp-validation/bin/wine)"
+
+          echo "Target: $WINE_TARGET"
+
+          if [ "$WINE_TARGET" != "../lib/wine/aarch64-unix/wine" ]; then
+            echo "ERROR: Unexpected bin/wine target"
+            exit 1
           fi
 
           echo
-          echo "wineserver symlink status:"
-          if [ -L "$ROOT/bin/wineserver" ]; then
-            readlink "$ROOT/bin/wineserver"
-            readlink -f "$ROOT/bin/wineserver"
-          else
-            echo "bin/wineserver is a regular file"
-          fi
+          echo "=== Check symlink now resolves ==="
+
+          test -e wcp-validation/bin/wine
+          echo "bin/wine resolves successfully"
 
           echo
-          echo "=== Broken symlinks, if any ==="
-          find "$ROOT" -xtype l -print || true
+          echo "=== Check executable permissions ==="
 
+          test -x wcp-validation/bin/wine
+          echo "bin/wine: executable"
+
+          test -x wcp-validation/bin/wineserver
+          echo "bin/wineserver: executable"
+
+          test -x wcp-validation/lib/wine/aarch64-unix/wine
+          echo "Wine target: executable"
+
+          echo
+          echo "=== File types ==="
+
+          file wcp-validation/bin/wineserver
+          file wcp-validation/lib/wine/aarch64-unix/wine
+
+          echo
+          echo "Wine launcher validation PASSED"
+          
       - name: Download ARM64EC prefix
         shell: bash
         run: |
