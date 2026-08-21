@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC Registry Test
+name: Package MapleStory ARM64EC Live Registry Test
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-1.2-arm64ec"
-      WCP_NAME: "proton-11.0-1.2-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-1.3-arm64ec"
+      WCP_NAME: "proton-11.0-1.3-arm64ec.wcp"
 
     steps:
       # ============================================================
@@ -591,7 +591,97 @@ jobs:
           echo "Prefix registry patch PASSED"
 
       # ============================================================
-      # 6. CREATE NEW 1.2 GAMENATIVE PROFILE
+      # 6. APPLY REGISTRY FIXES TO EXISTING LIVE PREFIX VIA WINE.INF
+      # ============================================================
+
+      - name: Inject MapleStory fixes into Wine update INF
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$CHECKPOINT_ROOT"
+          INF="$ROOT/share/wine/wine.inf"
+
+          test -f "$INF"
+          cp "$INF" "$GITHUB_WORKSPACE/wine.inf.before"
+
+          python3 - "$INF" <<'PYINF'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+          lines = text.splitlines()
+          section = "GameNativeMapleStory216150"
+
+          if f"[{section}]" in text:
+              raise SystemExit(f"ERROR: [{section}] already exists")
+
+          try:
+              base_index = lines.index("[BaseInstall]")
+          except ValueError:
+              raise SystemExit("ERROR: [BaseInstall] not found in wine.inf")
+
+          addreg_index = None
+          for i in range(base_index + 1, len(lines)):
+              if lines[i].startswith("["):
+                  break
+              if lines[i].strip() == "AddReg=\\":
+                  addreg_index = i
+                  break
+
+          if addreg_index is None:
+              raise SystemExit("ERROR: [BaseInstall] AddReg block not found")
+
+          lines.insert(addreg_index + 1, f"{section},\\")
+
+          patch = r"""
+          ; GameNative MapleStory Steam 216150 compatibility settings
+          [GameNativeMapleStory216150]
+          HKCU,Software\Wine\X11 Driver,"UseTakeFocus",,"N"
+          HKCU,Software\Wine\X11 Driver,"Grab",,"N"
+          HKCU,Software\Wine\X11 Driver,"GrabFullscreen",,"N"
+          HKCU,Software\Wine\X11 Driver,"UseLinuxInputEvents",,"Y"
+          HKCU,Software\Wine\DirectInput,"UseLinuxInputEvents",,"Y"
+          HKCU,Software\Wine\DirectInput,"KeyboardUseNonExclusive",,"Y"
+          HKCU,Software\Wine\DirectInput,"MouseUseNonExclusive",,"Y"
+          HKCU,Software\Wine\AppDefaults\MapleStory.exe,"Version",,"win10"
+          HKCU,Software\Wine\AppDefaults\nxsteam.exe,"Version",,"win10"
+          HKCU,Software\Wine\AppDefaults\SteamConnectorHelper.exe,"Version",,"win10"
+          HKCU,Software\Wine\Direct3D,"cb_access_map_w",0x10001,1
+          HKCU,Software\Wine\Direct3D,"CSMT",,"disabled"
+          HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"
+          HKCU,Software\Nexon Launcher,"Install Directory",,"C:\Nexon\Launcher"
+          HKCU,Software\Nexon Launcher,"Region",,"1"
+          HKLM,Software\Classes\Applications\nexon_launcher.exe\shell\open,"FriendlyAppName",,"Nexon Launcher"
+          HKLM,Software\Classes\nxl,,,"URL:nxl protocol"
+          HKLM,Software\Classes\nxl,"URL Protocol",,""
+          HKLM,Software\Classes\nxl\DefaultIcon,,,"C:\Nexon\Launcher\nexon_launcher.exe"
+          HKLM,Software\Classes\nxl\shell,,,""
+          HKLM,Software\Classes\nxl\shell\open,,,""
+          HKLM,Software\Classes\nxl\shell\open,"Friendly App Name",,"Nexon Launcher"
+          """
+
+          output = "\n".join(lines) + "\n" + patch.strip() + "\n"
+          path.write_text(output, encoding="utf-8")
+          PYINF
+
+          echo
+          echo "=== Validate patched wine.inf ==="
+          grep -Fq '[GameNativeMapleStory216150]' "$INF"
+          grep -Fq 'GameNativeMapleStory216150,\' "$INF"
+          grep -Fq 'HKCU,Software\Wine\X11 Driver,"UseTakeFocus",,"N"' "$INF"
+          grep -Fq 'HKCU,Software\Wine\AppDefaults\MapleStory.exe,"Version",,"win10"' "$INF"
+          grep -Fq 'HKCU,Software\Wine\Direct3D,"cb_access_map_w",0x10001,1' "$INF"
+          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"' "$INF"
+
+          # Wine prefixes track wine.inf's mtime in .update-timestamp.
+          touch "$INF"
+          stat "$INF"
+          echo "Live-prefix wine.inf patch PASSED"
+
+      # ============================================================
+      # 6. CREATE NEW 1.3 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -602,9 +692,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1.2-arm64ec",
+            "versionName": "11.0-1.3-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory Wine source patches plus registry fixes",
+            "description": "Proton 11 ARM64EC - MapleStory Wine source patches plus live-prefix registry fixes",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -619,14 +709,14 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.2-arm64ec"' \
+            '"versionName": "11.0-1.3-arm64ec"' \
             profile.json
 
           echo
           echo "Profile validation PASSED"
 
       # ============================================================
-      # 7. BUILD THE NEW WCP
+      # 8. BUILD THE NEW WCP
       # ============================================================
 
       - name: Build WCP
@@ -669,7 +759,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
       # ============================================================
-      # 8. VALIDATE FINAL WCP
+      # 9. VALIDATE FINAL WCP
       # ============================================================
 
       - name: Validate final WCP
@@ -720,7 +810,7 @@ jobs:
           cat packaged-profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.2-arm64ec"' \
+            '"versionName": "11.0-1.3-arm64ec"' \
             packaged-profile.json
 
           echo
@@ -811,6 +901,17 @@ jobs:
           echo "Packaged MapleStory registry validation PASSED"
 
           echo
+          echo "=== Validate live-prefix wine.inf inside final WCP ==="
+
+          grep -Fxq 'share/wine/wine.inf' wcp-files.txt
+          tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
+          grep -Fq '[GameNativeMapleStory216150]' packaged-wine.inf
+          grep -Fq 'GameNativeMapleStory216150,\' packaged-wine.inf
+          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"' packaged-wine.inf
+          grep -Fq 'HKCU,Software\Wine\AppDefaults\MapleStory.exe,"Version",,"win10"' packaged-wine.inf
+          echo "Packaged live-prefix wine.inf validation PASSED"
+
+          echo
           echo "=== Final SHA256 ==="
 
           sha256sum "$WCP"
@@ -821,13 +922,13 @@ jobs:
           echo "=========================================="
 
       # ============================================================
-      # 9. UPLOAD 1.2 WCP
+      # 10. UPLOAD 1.3 WCP
       # ============================================================
 
-      - name: Upload MapleStory registry-test WCP
+      - name: Upload MapleStory live-registry WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-1.2-arm64ec
-          path: proton-11.0-1.2-arm64ec.wcp
+          name: proton-11.0-1.3-arm64ec
+          path: proton-11.0-1.3-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
