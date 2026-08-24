@@ -1250,15 +1250,95 @@ jobs:
             '"CSMT"="disabled"' \
             "$USER_REG"
 
-          # 1.8 must not add our VC runtime overrides persistently to
-          # the packaged registry. They are applied per launch through
-          # WINEDLLOVERRIDES by bin/wine.
-          if grep -Fq '"vcruntime140"="native,builtin"' "$USER_REG" || \
-             grep -Fq '"msvcp140"="native,builtin"' "$USER_REG" || \
-             grep -Fq '"ucrtbase"="native,builtin"' "$USER_REG"; then
-            echo "ERROR: persistent VC runtime override leaked into 1.8 prefix"
-            exit 1
-          fi
+          # 1.8 must not ADD or CHANGE persistent VC-runtime overrides.
+          # The upstream GameNative Proton 11 ARM64EC prefix may already carry
+          # some DllOverrides of its own, so requiring these values to be absent
+          # is incorrect. Compare the final packaged prefix against the exact
+          # upstream base prefix instead. Any inherited values are allowed only
+          # if they are byte-for-byte the same logical registry values as base.
+          rm -rf base_prefix_validation
+          mkdir -p base_prefix_validation
+
+          tar xJf prefixPack-base.txz \
+            -C base_prefix_validation
+
+          BASE_USER_REG="$(find base_prefix_validation -type f -name user.reg -print -quit)"
+          test -n "$BASE_USER_REG"
+
+          python3 - \
+            "$BASE_USER_REG" \
+            "$USER_REG" <<'PYVCREG'
+          import re
+          import sys
+          from pathlib import Path
+
+          base_path = Path(sys.argv[1])
+          final_path = Path(sys.argv[2])
+
+          section_name = r"Software\\Wine\\DllOverrides"
+          relevant_names = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+          value_re = re.compile(r'^"([^"]+)"=(.*)$')
+
+
+          def extract_relevant(path):
+              lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
+              in_section = False
+              result = {}
+
+              for line in lines:
+                  match = section_re.match(line)
+                  if match:
+                      in_section = match.group(1) == section_name
+                      continue
+
+                  if not in_section:
+                      continue
+
+                  value_match = value_re.match(line)
+                  if not value_match:
+                      continue
+
+                  name, value = value_match.groups()
+                  if name in relevant_names:
+                      result[name] = value
+
+              return result
+
+
+          base_values = extract_relevant(base_path)
+          final_values = extract_relevant(final_path)
+
+          print("Base VC DllOverrides:", base_values)
+          print("Final VC DllOverrides:", final_values)
+
+          differences = []
+          for name in relevant_names:
+              base_value = base_values.get(name)
+              final_value = final_values.get(name)
+              if final_value != base_value:
+                  differences.append((name, base_value, final_value))
+
+          if differences:
+              print("ERROR: 1.8 changed persistent VC runtime DllOverrides:")
+              for name, base_value, final_value in differences:
+                  print(f"  {name}: base={base_value!r} final={final_value!r}")
+              raise SystemExit(1)
+
+          print("Persistent VC runtime DllOverrides unchanged from upstream base prefix")
+          PYVCREG
 
           grep -Fq \
             '"URL Protocol"=""' \
