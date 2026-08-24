@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC VC Runtime Test
+name: Package MapleStory ARM64EC Direct Runtime Test
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-1.4-arm64ec"
-      WCP_NAME: "proton-11.0-1.4-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-1.5-arm64ec"
+      WCP_NAME: "proton-11.0-1.5-arm64ec.wcp"
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
     steps:
@@ -245,7 +245,7 @@ jobs:
       # 6. APPLY THE MAPLESTORY REGISTRY FIXES
       #
       # Keep the registry layer from 1.3 unchanged. The only new
-      # compatibility variable in 1.4 is the VC++ runtime payload.
+      # compatibility variable in 1.5 is vcruntime140_threads.dll.
       # NO Wine rebuild here.
       # ============================================================
 
@@ -673,13 +673,19 @@ jobs:
           echo "Prefix registry patch PASSED"
 
       # ============================================================
-      # 7. ADD VC++ RUNTIME FILES TO THE PACKAGED PREFIX
+      # 7. ADD ONLY vcruntime140_threads.dll TO THE PACKAGED PREFIX
       #
-      # This handles a newly-created prefix. The separate Wine INF
-      # step below handles the already-existing MapleStory prefix.
+      # Controlled 1.5 variable:
+      #   - system32/vcruntime140_threads.dll
+      #   - syswow64/vcruntime140_threads.dll
+      #
+      # We deliberately do NOT replace ucrtbase.dll or the rest of the
+      # VC runtime set yet. Earlier MapleStory logs already showed several
+      # v14 runtime DLLs loading, while vcruntime140_threads.dll was not
+      # observed. This keeps the experiment narrow and reversible.
       # ============================================================
 
-      - name: Add MapleStory VC runtime files to packaged prefix
+      - name: Add vcruntime140_threads.dll to packaged prefix
         shell: bash
         run: |
           set -euxo pipefail
@@ -703,59 +709,21 @@ jobs:
             "$DRIVE_C/windows/system32" \
             "$DRIVE_C/windows/syswow64"
 
-          SYS32=(
-            concrt140.dll
-            msvcp140.dll
-            msvcp140_1.dll
-            msvcp140_2.dll
-            msvcp140_atomic_wait.dll
-            msvcp140_codecvt_ids.dll
-            ucrtbase.dll
-            vccorlib140.dll
-            vcomp140.dll
-            vcruntime140.dll
-            vcruntime140_1.dll
-            vcruntime140_threads.dll
-          )
+          cp -f \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
 
-          WOW64=(
-            concrt140.dll
-            msvcp140.dll
-            msvcp140_1.dll
-            msvcp140_2.dll
-            msvcp140_atomic_wait.dll
-            msvcp140_codecvt_ids.dll
-            ucrtbase.dll
-            vccorlib140.dll
-            vcomp140.dll
-            vcruntime140.dll
-            vcruntime140_threads.dll
-          )
+          cp -f \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
 
-          for dll in "${SYS32[@]}"; do
-            cp -a "$PAYLOAD/system32/$dll" \
-              "$DRIVE_C/windows/system32/$dll"
-          done
+          cmp -s \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
 
-          for dll in "${WOW64[@]}"; do
-            cp -a "$PAYLOAD/syswow64/$dll" \
-              "$DRIVE_C/windows/syswow64/$dll"
-          done
-
-          echo "=== Verify runtime inside prefix ==="
-          for dll in "${SYS32[@]}"; do
-            cmp -s \
-              "$PAYLOAD/system32/$dll" \
-              "$DRIVE_C/windows/system32/$dll"
-            echo "FOUND system32/$dll"
-          done
-
-          for dll in "${WOW64[@]}"; do
-            cmp -s \
-              "$PAYLOAD/syswow64/$dll" \
-              "$DRIVE_C/windows/syswow64/$dll"
-            echo "FOUND syswow64/$dll"
-          done
+          cmp -s \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
 
           tar cJf prefixPack.txz \
             -C prefix_runtime_work \
@@ -764,7 +732,7 @@ jobs:
           test -s prefixPack.txz
 
           echo
-          echo "VC runtime packaged-prefix injection PASSED"
+          echo "Packaged-prefix vcruntime140_threads.dll injection PASSED"
 
       # ============================================================
       # 8. APPLY REGISTRY FIXES TO EXISTING LIVE PREFIX VIA WINE.INF
@@ -826,7 +794,7 @@ jobs:
           HKCU,Software\Wine\AppDefaults\SteamConnectorHelper.exe,"Version",,"win10"
           HKCU,Software\Wine\Direct3D,"cb_access_map_w",0x10001,1
           HKCU,Software\Wine\Direct3D,"CSMT",,"disabled"
-          HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.4"
+          HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"
           HKCU,Software\Nexon Launcher,"Install Directory",,"C:\Nexon\Launcher"
           HKCU,Software\Nexon Launcher,"Region",,"1"
           HKLM,Software\Classes\Applications\nexon_launcher.exe\shell\open,"FriendlyAppName",,"Nexon Launcher"
@@ -849,7 +817,7 @@ jobs:
           grep -Fq 'HKCU,Software\Wine\X11 Driver,"UseTakeFocus",,"N"' "$INF"
           grep -Fq 'HKCU,Software\Wine\AppDefaults\MapleStory.exe,"Version",,"win10"' "$INF"
           grep -Fq 'HKCU,Software\Wine\Direct3D,"cb_access_map_w",0x10001,1' "$INF"
-          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.4"' "$INF"
+          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"' "$INF"
 
           # Wine prefixes track wine.inf's mtime in .update-timestamp.
           touch "$INF"
@@ -857,186 +825,153 @@ jobs:
           echo "Live-prefix wine.inf patch PASSED"
 
       # ============================================================
-      # 9. DEPLOY VC++ RUNTIME TO THE EXISTING LIVE PREFIX VIA WINE.INF
+      # 9. STAGE vcruntime140_threads.dll AND WRAP bin/wine
       #
-      # Wineboot reruns DefaultInstall when wine.inf is newer than the
-      # prefix update timestamp. Add the runtime files as CopyFiles
-      # sources so switching to this 1.4 WCP updates the live prefix.
+      # 1.4 attempted Wine INF CopyFiles/WineSourceDirs and made Wine
+      # itself exit with status 53 before TestD3D or NXSteam started.
+      # This build intentionally contains NONE of that CopyFiles logic.
+      #
+      # The wrapper only deploys the DLL when Steam App 216150 is being
+      # launched. GameNative Test Graphics therefore exercises the wrapper
+      # path but does not modify the live prefix.
       # ============================================================
 
-      - name: Inject MapleStory VC runtime into Wine update INF
+      - name: Stage direct MapleStory runtime deployment wrapper
         shell: bash
         run: |
           set -euxo pipefail
 
           ROOT="$CHECKPOINT_ROOT"
-          INF="$ROOT/share/wine/wine.inf"
           PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
           RUNTIME_ROOT="$ROOT/share/wine/maplestory_vc_runtime"
 
-          test -f "$INF"
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
 
           rm -rf "$RUNTIME_ROOT"
           mkdir -p \
             "$RUNTIME_ROOT/system32" \
             "$RUNTIME_ROOT/syswow64"
 
-          cp -a "$PAYLOAD/system32/." \
-            "$RUNTIME_ROOT/system32/"
-
-          cp -a "$PAYLOAD/syswow64/." \
-            "$RUNTIME_ROOT/syswow64/"
-
-          python3 - "$INF" <<'PYRUNTIME'
-          import sys
-          from pathlib import Path
-
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
-          lines = text.splitlines()
-
-          sys32 = [
-              "concrt140.dll",
-              "msvcp140.dll",
-              "msvcp140_1.dll",
-              "msvcp140_2.dll",
-              "msvcp140_atomic_wait.dll",
-              "msvcp140_codecvt_ids.dll",
-              "ucrtbase.dll",
-              "vccorlib140.dll",
-              "vcomp140.dll",
-              "vcruntime140.dll",
-              "vcruntime140_1.dll",
-              "vcruntime140_threads.dll",
-          ]
-
-          wow64 = [
-              "concrt140.dll",
-              "msvcp140.dll",
-              "msvcp140_1.dll",
-              "msvcp140_2.dll",
-              "msvcp140_atomic_wait.dll",
-              "msvcp140_codecvt_ids.dll",
-              "ucrtbase.dll",
-              "vccorlib140.dll",
-              "vcomp140.dll",
-              "vcruntime140.dll",
-              "vcruntime140_threads.dll",
-          ]
-
-          def section_bounds(name):
-              header = f"[{name}]"
-              try:
-                  start = lines.index(header)
-              except ValueError:
-                  raise SystemExit(f"ERROR: {header} not found")
-
-              end = len(lines)
-              for i in range(start + 1, len(lines)):
-                  if lines[i].startswith("["):
-                      end = i
-                      break
-              return start, end
-
-          # Add our two copy sections to BaseInstall's existing CopyFiles line.
-          start, end = section_bounds("BaseInstall")
-          copy_index = None
-          for i in range(start + 1, end):
-              if lines[i].startswith("CopyFiles="):
-                  copy_index = i
-                  break
-
-          if copy_index is None:
-              raise SystemExit("ERROR: BaseInstall CopyFiles line not found")
-
-          required = ["MapleVCRuntime64", "MapleVCRuntime32"]
-          current = lines[copy_index]
-          for name in required:
-              if name not in current:
-                  current += f",{name}"
-          lines[copy_index] = current
-
-          # Add source-directory mappings.
-          start, end = section_bounds("WineSourceDirs")
-          source_lines = {
-              "MapleVCRuntime64": "MapleVCRuntime64 = maplestory_vc_runtime/system32",
-              "MapleVCRuntime32": "MapleVCRuntime32 = maplestory_vc_runtime/syswow64",
-          }
-          present = set(lines[start + 1:end])
-          inserts = [v for v in source_lines.values() if v not in present]
-          for value in reversed(inserts):
-              lines.insert(end, value)
-
-          # Add destination mappings. DIRID 10 is the Windows directory;
-          # explicit subdirectories avoid architecture-dependent DIRID 11
-          # behavior when installing both 64-bit and WOW64 files.
-          start, end = section_bounds("DestinationDirs")
-          dest_lines = {
-              "MapleVCRuntime64": r"MapleVCRuntime64 = 10,system32",
-              "MapleVCRuntime32": r"MapleVCRuntime32 = 10,syswow64",
-          }
-          present = set(lines[start + 1:end])
-          inserts = [v for v in dest_lines.values() if v not in present]
-          for value in reversed(inserts):
-              lines.insert(end, value)
-
-          if "[MapleVCRuntime64]" in lines or "[MapleVCRuntime32]" in lines:
-              raise SystemExit("ERROR: runtime CopyFiles sections already exist")
-
-          lines.extend([""])
-          lines.append("[MapleVCRuntime64]")
-          lines.extend(sys32)
-          lines.append("")
-          lines.append("[MapleVCRuntime32]")
-          lines.extend(wow64)
-          lines.append("")
-
-          path.write_text("\n".join(lines), encoding="utf-8")
-          PYRUNTIME
-
-          echo "=== Validate runtime Wine INF integration ==="
-
-          grep -Fq \
-            'CopyFiles=ColorFiles,EtcFiles,InfFiles,NlsFiles,SortFiles,WinmdFiles,MapleVCRuntime64,MapleVCRuntime32' \
-            "$INF"
-
-          grep -Fq \
-            'MapleVCRuntime64 = maplestory_vc_runtime/system32' \
-            "$INF"
-
-          grep -Fq \
-            'MapleVCRuntime32 = maplestory_vc_runtime/syswow64' \
-            "$INF"
-
-          grep -Fq \
-            'MapleVCRuntime64 = 10,system32' \
-            "$INF"
-
-          grep -Fq \
-            'MapleVCRuntime32 = 10,syswow64' \
-            "$INF"
-
-          grep -Fq '[MapleVCRuntime64]' "$INF"
-          grep -Fq '[MapleVCRuntime32]' "$INF"
-          grep -Fq 'vcruntime140_1.dll' "$INF"
-          grep -Fq 'vcruntime140_threads.dll' "$INF"
-
-          test -s \
+          cp -f \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
             "$RUNTIME_ROOT/system32/vcruntime140_threads.dll"
 
-          test -s \
+          cp -f \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
             "$RUNTIME_ROOT/syswow64/vcruntime140_threads.dll"
 
-          # This is the final wine.inf mutation for 1.4. Give it a fresh
-          # mtime so wineboot sees a prefix update on first launch.
-          touch "$INF"
+          test -s "$RUNTIME_ROOT/system32/vcruntime140_threads.dll"
+          test -s "$RUNTIME_ROOT/syswow64/vcruntime140_threads.dll"
+
+          # Preserve the original Wine launcher target separately.
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
+
+          rm -f "$ROOT/bin/wine.real"
+          ln -s ../lib/wine/aarch64-unix/wine "$ROOT/bin/wine.real"
+
+          rm -f "$ROOT/bin/wine"
+
+          cat > "$ROOT/bin/wine" <<'SH'
+          #!/bin/sh
+          # GameNative MapleStory 216150 vcruntime140_threads shim.
+
+          SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 50
+          ROOT_DIR=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd) || exit 51
+          REAL_WINE="$SCRIPT_DIR/wine.real"
+          RUNTIME_ROOT="$ROOT_DIR/share/wine/maplestory_vc_runtime"
+
+          if [ ! -x "$REAL_WINE" ]; then
+              echo "[GN-MS-1.5] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              exit 52
+          fi
+
+          # Restrict the mutation to MapleStory. Test Graphics does not set
+          # SteamGameId/SteamAppId to 216150, so it passes straight through.
+          if [ "${SteamGameId:-}" = "216150" ] || [ "${SteamAppId:-}" = "216150" ]; then
+              PREFIX="${WINEPREFIX:-}"
+
+              if [ -z "$PREFIX" ]; then
+                  echo "[GN-MS-1.5] ERROR: MapleStory launch has no WINEPREFIX" >&2
+                  exit 54
+              fi
+
+              SYS32="$PREFIX/drive_c/windows/system32"
+              WOW64="$PREFIX/drive_c/windows/syswow64"
+              SRC64="$RUNTIME_ROOT/system32/vcruntime140_threads.dll"
+              SRC32="$RUNTIME_ROOT/syswow64/vcruntime140_threads.dll"
+              MARKER="$PREFIX/.gamenative-maplestory-vcruntime140-threads-1.5"
+
+              if [ ! -s "$SRC64" ] || [ ! -s "$SRC32" ]; then
+                  echo "[GN-MS-1.5] ERROR: packaged runtime payload missing" >&2
+                  exit 55
+              fi
+
+              if [ -d "$SYS32" ] && [ -d "$WOW64" ]; then
+                  if [ ! -f "$MARKER" ]; then
+                      echo "[GN-MS-1.5] Installing vcruntime140_threads.dll into $PREFIX" >&2
+
+                      # rm first so an existing destination symlink cannot
+                      # cause cp to overwrite a Wine distribution target.
+                      rm -f "$SYS32/vcruntime140_threads.dll" || exit 57
+                      rm -f "$WOW64/vcruntime140_threads.dll" || exit 57
+
+                      cp "$SRC64" "$SYS32/vcruntime140_threads.dll" || exit 58
+                      cp "$SRC32" "$WOW64/vcruntime140_threads.dll" || exit 58
+
+                      chmod 0644 \
+                        "$SYS32/vcruntime140_threads.dll" \
+                        "$WOW64/vcruntime140_threads.dll" || exit 59
+
+                      if [ ! -s "$SYS32/vcruntime140_threads.dll" ] || \
+                         [ ! -s "$WOW64/vcruntime140_threads.dll" ]; then
+                          echo "[GN-MS-1.5] ERROR: runtime copy verification failed" >&2
+                          exit 60
+                      fi
+
+                      {
+                          echo "GameNative MapleStory runtime test 1.5"
+                          echo "SteamAppId=216150"
+                          echo "Installed=vcruntime140_threads.dll"
+                      } > "$MARKER" || exit 61
+
+                      echo "[GN-MS-1.5] Runtime install complete" >&2
+                  else
+                      echo "[GN-MS-1.5] Runtime marker already present" >&2
+                  fi
+              else
+                  # New prefixes are already covered by prefixPack.txz.
+                  echo "[GN-MS-1.5] drive_c not ready; using packaged-prefix runtime" >&2
+              fi
+          fi
+
+          exec "$REAL_WINE" "$@"
+          SH
+
+          chmod 755 "$ROOT/bin/wine"
 
           echo
-          stat "$INF"
-          echo "Live-prefix VC runtime Wine INF injection PASSED"
+          echo "=== Validate wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+
+          test -L "$ROOT/bin/wine.real"
+          test -e "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+          test "$(readlink "$ROOT/bin/wine.real")" = "../lib/wine/aarch64-unix/wine"
+
+          grep -Fq 'SteamGameId:-' "$ROOT/bin/wine"
+          grep -Fq '216150' "$ROOT/bin/wine"
+          grep -Fq 'vcruntime140_threads.dll' "$ROOT/bin/wine"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
+
+          echo
+          echo "Direct runtime deployment wrapper PASSED"
 
       # ============================================================
-      # 10. CREATE NEW 1.4 GAMENATIVE PROFILE
+      # 10. CREATE NEW 1.5 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -1047,9 +982,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1.4-arm64ec",
+            "versionName": "11.0-1.5-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory Wine/registry fixes plus VC++ runtime payload",
+            "description": "Proton 11 ARM64EC - MapleStory Wine/registry fixes plus direct vcruntime140_threads deployment",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -1064,7 +999,7 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.4-arm64ec"' \
+            '"versionName": "11.0-1.5-arm64ec"' \
             profile.json
 
           echo
@@ -1145,6 +1080,7 @@ jobs:
 
           for f in \
             bin/wine \
+            bin/wine.real \
             bin/wineserver \
             lib/wine/aarch64-unix/wine \
             prefixPack.txz \
@@ -1165,7 +1101,7 @@ jobs:
           cat packaged-profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.4-arm64ec"' \
+            '"versionName": "11.0-1.5-arm64ec"' \
             packaged-profile.json
 
           echo
@@ -1177,25 +1113,27 @@ jobs:
           tar xJf "$WCP" \
             -C wcp_validation \
             bin/wine \
+            bin/wine.real \
             bin/wineserver \
             lib/wine/aarch64-unix/wine
 
-          test -L \
-            wcp_validation/bin/wine
+          test -f wcp_validation/bin/wine
+          test ! -L wcp_validation/bin/wine
+          test -x wcp_validation/bin/wine
 
-          test -e \
-            wcp_validation/bin/wine
+          test -L wcp_validation/bin/wine.real
+          test -e wcp_validation/bin/wine.real
+          test -x wcp_validation/bin/wine.real
+          test "$(readlink wcp_validation/bin/wine.real)" = "../lib/wine/aarch64-unix/wine"
 
-          test -x \
-            wcp_validation/bin/wine
+          test -x wcp_validation/bin/wineserver
+          test -x wcp_validation/lib/wine/aarch64-unix/wine
 
-          test -x \
-            wcp_validation/bin/wineserver
+          grep -Fq 'SteamGameId:-' wcp_validation/bin/wine
+          grep -Fq 'vcruntime140_threads.dll' wcp_validation/bin/wine
+          grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
 
-          test -x \
-            wcp_validation/lib/wine/aarch64-unix/wine
-
-          echo "Wine launcher validation PASSED"
+          echo "Wine wrapper/launcher validation PASSED"
 
           echo
           echo "=== Validate patched prefix inside final WCP ==="
@@ -1262,40 +1200,34 @@ jobs:
           tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
           grep -Fq '[GameNativeMapleStory216150]' packaged-wine.inf
           grep -Fq 'GameNativeMapleStory216150,\' packaged-wine.inf
-          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.4"' packaged-wine.inf
+          grep -Fq 'HKCU,Software\Wine\GameNativeMapleStory,"AppliedVersion",,"1.3"' packaged-wine.inf
           grep -Fq 'HKCU,Software\Wine\AppDefaults\MapleStory.exe,"Version",,"win10"' packaged-wine.inf
           echo "Packaged live-prefix wine.inf validation PASSED"
 
           echo
-          echo "=== Validate VC runtime payload inside final WCP ==="
+          echo "=== Validate direct runtime payload inside final WCP ==="
 
           for f in \
             share/wine/maplestory_vc_runtime/system32/vcruntime140_threads.dll \
-            share/wine/maplestory_vc_runtime/system32/vcruntime140_1.dll \
             share/wine/maplestory_vc_runtime/syswow64/vcruntime140_threads.dll
           do
             grep -Fxq "$f" wcp-files.txt
             echo "FOUND: $f"
           done
 
-          grep -Fq \
-            'MapleVCRuntime64 = maplestory_vc_runtime/system32' \
-            packaged-wine.inf
+          # Safety check: the broken 1.4 CopyFiles mechanism must be absent.
+          if grep -Fq 'MapleVCRuntime64' packaged-wine.inf; then
+            echo "ERROR: MapleVCRuntime64 wine.inf integration leaked into 1.5"
+            exit 1
+          fi
 
-          grep -Fq \
-            'MapleVCRuntime32 = maplestory_vc_runtime/syswow64' \
-            packaged-wine.inf
-
-          grep -Fq \
-            '[MapleVCRuntime64]' \
-            packaged-wine.inf
-
-          grep -Fq \
-            '[MapleVCRuntime32]' \
-            packaged-wine.inf
+          if grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
+            echo "ERROR: MapleVCRuntime32 wine.inf integration leaked into 1.5"
+            exit 1
+          fi
 
           echo
-          echo "=== Validate VC runtime inside packaged prefix ==="
+          echo "=== Validate vcruntime140_threads.dll inside packaged prefix ==="
 
           PREFIX_DRIVE_C="$(find packaged_prefix -type d -name drive_c -print -quit)"
           test -n "$PREFIX_DRIVE_C"
@@ -1304,12 +1236,9 @@ jobs:
             "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
 
           test -s \
-            "$PREFIX_DRIVE_C/windows/system32/vcruntime140_1.dll"
-
-          test -s \
             "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
 
-          echo "Packaged VC runtime validation PASSED"
+          echo "Packaged/direct runtime validation PASSED"
 
           echo
           echo "=== Final SHA256 ==="
@@ -1322,13 +1251,13 @@ jobs:
           echo "=========================================="
 
       # ============================================================
-      # 13. UPLOAD 1.4 WCP
+      # 13. UPLOAD 1.5 WCP
       # ============================================================
 
-      - name: Upload MapleStory VC-runtime WCP
+      - name: Upload MapleStory direct-runtime WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-1.4-arm64ec
-          path: proton-11.0-1.4-arm64ec.wcp
+          name: proton-11.0-1.5-arm64ec
+          path: proton-11.0-1.5-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
