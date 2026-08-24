@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC Full VC Runtime Test 1.7
+name: Package MapleStory ARM64EC Full VC Runtime Env Override Test 1.8
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-1.7-arm64ec"
-      WCP_NAME: "proton-11.0-1.7-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-1.8-arm64ec"
+      WCP_NAME: "proton-11.0-1.8-arm64ec.wcp"
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
     steps:
@@ -244,8 +244,9 @@ jobs:
       # ============================================================
       # 6. APPLY THE MAPLESTORY REGISTRY FIXES
       #
-      # Keep the MapleStory compatibility registry layer and add only the
-      # VC-runtime DllOverrides used by the pinned reference setup.
+      # Keep the known-good MapleStory compatibility registry layer.
+      # Do NOT add persistent VC-runtime DllOverrides here; 1.8 applies
+      # those per launch through WINEDLLOVERRIDES instead.
       # NO Wine rebuild here.
       # ============================================================
 
@@ -376,20 +377,6 @@ jobs:
                   "CSMT": ("str", "disabled"),
               },
 
-              # Exact VC-runtime override subset from the pinned
-              # linux_maplestory Direct3D/DLL override registry patch.
-              r"Software\\Wine\\DllOverrides": {
-                  "concrt140": ("str", "native,builtin"),
-                  "msvcp140": ("str", "native,builtin"),
-                  "msvcp140_1": ("str", "native,builtin"),
-                  "msvcp140_2": ("str", "native,builtin"),
-                  "msvcp140_atomic_wait": ("str", "native,builtin"),
-                  "msvcp140_codecvt_ids": ("str", "native,builtin"),
-                  "ucrtbase": ("str", "native,builtin"),
-                  "vcomp140": ("str", "native,builtin"),
-                  "vcruntime140": ("str", "native,builtin"),
-                  "vcruntime140_1": ("str", "native,builtin"),
-              },
           }
 
 
@@ -776,16 +763,18 @@ jobs:
       # IMPORTANT:
       #   - No wine.inf edits.
       #   - No WineSourceDirs / CopyFiles integration.
+      #   - No nested Wine/regedit process.
       #   - No esync changes.
-      #   - TestD3D bypasses all MapleStory prefix mutation.
+      #   - TestD3D bypasses all MapleStory prefix mutation and VC overrides.
       #
       # On the first real Steam App 216150 launch, the wrapper copies the
-      # complete runtime into the active $WINEPREFIX and imports ONLY the
-      # reference VC-runtime DllOverrides via regedit /S. The wrapper then
-      # marks the prefix so later launches pass straight through.
+      # complete runtime directly into the active $WINEPREFIX. On every real
+      # MapleStory launch it then adds ONLY the reference VC-runtime override
+      # subset to WINEDLLOVERRIDES using native-first/builtin-fallback (n,b),
+      # preserving any overrides GameNative already supplied.
       # ============================================================
 
-      - name: Stage full VC runtime direct-deployment wrapper
+      - name: Stage full VC runtime env-override wrapper
         shell: bash
         run: |
           set -euxo pipefail
@@ -863,7 +852,7 @@ jobs:
 
           cat > "$ROOT/bin/wine" <<'SH'
           #!/bin/sh
-          # GameNative MapleStory 216150 full VC-runtime shim (1.7).
+          # GameNative MapleStory 216150 full VC-runtime shim (1.8).
 
           # Do not use command substitution for path discovery. GameNative's
           # LD_PRELOAD evshim writes startup messages to stdout.
@@ -875,7 +864,7 @@ jobs:
                   SCRIPT_PATH="$PWD/$0"
                   ;;
               *)
-                  echo "[GN-MS-1.7] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  echo "[GN-MS-1.8] ERROR: Wine wrapper was invoked without a path: $0" >&2
                   exit 50
                   ;;
           esac
@@ -886,12 +875,13 @@ jobs:
           RUNTIME_ROOT="$ROOT_DIR/share/wine/maplestory_vc_runtime"
 
           if [ ! -x "$REAL_WINE" ]; then
-              echo "[GN-MS-1.7] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              echo "[GN-MS-1.8] ERROR: real Wine launcher missing: $REAL_WINE" >&2
               exit 52
           fi
 
           # GameNative may carry Steam IDs and normal game arguments into its
-          # graphics test. Never mutate a prefix during TestD3D.
+          # graphics test. Never mutate a prefix or apply VC overrides during
+          # TestD3D.
           IS_TEST_D3D=0
           for ARG in "$@"; do
               case "$ARG" in
@@ -906,19 +896,17 @@ jobs:
                   PREFIX="${WINEPREFIX:-}"
 
                   if [ -z "$PREFIX" ]; then
-                      echo "[GN-MS-1.7] ERROR: MapleStory launch has no WINEPREFIX" >&2
+                      echo "[GN-MS-1.8] ERROR: MapleStory launch has no WINEPREFIX" >&2
                       exit 54
                   fi
 
                   SYS32="$PREFIX/drive_c/windows/system32"
                   WOW64="$PREFIX/drive_c/windows/syswow64"
-                  MARKER="$PREFIX/.gamenative-maplestory-full-vc-runtime-1.7"
-                  REG_FILE_UNIX="$PREFIX/drive_c/gamenative-maplestory-vc-runtime-1.7.reg"
-                  REG_FILE_WIN='C:\gamenative-maplestory-vc-runtime-1.7.reg'
+                  MARKER="$PREFIX/.gamenative-maplestory-full-vc-runtime-1.8"
 
                   if [ -d "$SYS32" ] && [ -d "$WOW64" ]; then
                       if [ ! -f "$MARKER" ]; then
-                          echo "[GN-MS-1.7] Installing complete VC runtime into $PREFIX" >&2
+                          echo "[GN-MS-1.8] Installing complete VC runtime into $PREFIX" >&2
 
                           SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll vcruntime140_threads.dll'
                           WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_threads.dll'
@@ -927,7 +915,7 @@ jobs:
                               SRC="$RUNTIME_ROOT/system32/$DLL"
                               DST="$SYS32/$DLL"
                               if [ ! -s "$SRC" ]; then
-                                  echo "[GN-MS-1.7] ERROR: missing packaged system32 runtime: $DLL" >&2
+                                  echo "[GN-MS-1.8] ERROR: missing packaged system32 runtime: $DLL" >&2
                                   exit 55
                               fi
                               rm -f "$DST" || exit 57
@@ -940,7 +928,7 @@ jobs:
                               SRC="$RUNTIME_ROOT/syswow64/$DLL"
                               DST="$WOW64/$DLL"
                               if [ ! -s "$SRC" ]; then
-                                  echo "[GN-MS-1.7] ERROR: missing packaged syswow64 runtime: $DLL" >&2
+                                  echo "[GN-MS-1.8] ERROR: missing packaged syswow64 runtime: $DLL" >&2
                                   exit 55
                               fi
                               rm -f "$DST" || exit 57
@@ -949,45 +937,39 @@ jobs:
                               [ -s "$DST" ] || exit 60
                           done
 
-                          cat > "$REG_FILE_UNIX" <<'REGEOF'
-          Windows Registry Editor Version 5.00
-
-          [HKEY_CURRENT_USER\Software\Wine\DllOverrides]
-          "concrt140"="native,builtin"
-          "msvcp140"="native,builtin"
-          "msvcp140_1"="native,builtin"
-          "msvcp140_2"="native,builtin"
-          "msvcp140_atomic_wait"="native,builtin"
-          "msvcp140_codecvt_ids"="native,builtin"
-          "ucrtbase"="native,builtin"
-          "vcomp140"="native,builtin"
-          "vcruntime140"="native,builtin"
-          "vcruntime140_1"="native,builtin"
-          REGEOF
-
-                          echo "[GN-MS-1.7] Importing VC runtime DllOverrides" >&2
-                          WINEPREFIX="$PREFIX" WINEDEBUG=-all \
-                              "$REAL_WINE" regedit /S "$REG_FILE_WIN" || exit 62
-
-                          rm -f "$REG_FILE_UNIX" || true
-
                           {
-                              echo "GameNative MapleStory full VC runtime test 1.7"
+                              echo "GameNative MapleStory full VC runtime test 1.8"
                               echo "SteamAppId=216150"
                               echo "system32=12 runtime DLLs"
                               echo "syswow64=11 runtime DLLs"
-                              echo "DllOverrides=reference VC subset native,builtin"
+                              echo "DllOverrides=WINEDLLOVERRIDES reference VC subset n,b"
                           } > "$MARKER" || exit 63
 
-                          echo "[GN-MS-1.7] Full VC runtime install complete" >&2
+                          echo "[GN-MS-1.8] Full VC runtime install complete" >&2
                       else
-                          echo "[GN-MS-1.7] Full VC runtime marker already present" >&2
+                          echo "[GN-MS-1.8] Full VC runtime marker already present" >&2
                       fi
                   else
-                      # A newly seeded prefix already contains the runtime and
-                      # VC overrides in prefixPack.txz.
-                      echo "[GN-MS-1.7] drive_c not ready; using packaged-prefix runtime" >&2
+                      # A newly seeded prefix already contains the runtime in
+                      # prefixPack.txz. Do not attempt nested Wine setup here.
+                      echo "[GN-MS-1.8] drive_c not ready; using packaged-prefix runtime" >&2
                   fi
+
+                  # Exact VC-runtime override subset from the pinned reference
+                  # registry patch, expressed as per-launch Wine environment
+                  # overrides. vccorlib140 and vcruntime140_threads are copied
+                  # but intentionally are not forced because the reference
+                  # override patch does not force them.
+                  VC_OVERRIDES='concrt140=n,b;msvcp140=n,b;msvcp140_1=n,b;msvcp140_2=n,b;msvcp140_atomic_wait=n,b;msvcp140_codecvt_ids=n,b;ucrtbase=n,b;vcomp140=n,b;vcruntime140=n,b;vcruntime140_1=n,b'
+
+                  if [ -n "${WINEDLLOVERRIDES:-}" ]; then
+                      WINEDLLOVERRIDES="${WINEDLLOVERRIDES};${VC_OVERRIDES}"
+                  else
+                      WINEDLLOVERRIDES="$VC_OVERRIDES"
+                  fi
+
+                  export WINEDLLOVERRIDES
+                  echo "[GN-MS-1.8] VC runtime WINEDLLOVERRIDES enabled" >&2
               fi
           fi
 
@@ -1016,9 +998,15 @@ jobs:
           grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' "$ROOT/bin/wine"
           grep -Fq 'vcruntime140_threads.dll' "$ROOT/bin/wine"
           grep -Fq 'ucrtbase.dll' "$ROOT/bin/wine"
-          grep -Fq 'regedit /S' "$ROOT/bin/wine"
-          grep -Fq 'native,builtin' "$ROOT/bin/wine"
+          grep -Fq 'WINEDLLOVERRIDES' "$ROOT/bin/wine"
+          grep -Fq 'vcruntime140_1=n,b' "$ROOT/bin/wine"
+          grep -Fq 'VC runtime WINEDLLOVERRIDES enabled' "$ROOT/bin/wine"
           grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
+
+          if grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
+              echo "ERROR: 1.8 wrapper still contains nested regedit"
+              exit 1
+          fi
 
           if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" || \
              grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
@@ -1027,10 +1015,10 @@ jobs:
           fi
 
           echo
-          echo "Full VC runtime deployment wrapper PASSED"
+          echo "Full VC runtime env-override wrapper PASSED"
 
       # ============================================================
-      # 9. CREATE NEW 1.7 GAMENATIVE PROFILE
+      # 9. CREATE NEW 1.8 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -1041,9 +1029,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1.7-arm64ec",
+            "versionName": "11.0-1.8-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory fixes plus full pinned VC runtime and reference VC DLL overrides",
+            "description": "Proton 11 ARM64EC - MapleStory fixes plus full pinned VC runtime and per-launch reference VC WINEDLLOVERRIDES",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -1058,7 +1046,7 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.7-arm64ec"' \
+            '"versionName": "11.0-1.8-arm64ec"' \
             profile.json
 
           echo
@@ -1160,7 +1148,7 @@ jobs:
           cat packaged-profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.7-arm64ec"' \
+            '"versionName": "11.0-1.8-arm64ec"' \
             packaged-profile.json
 
           echo
@@ -1194,8 +1182,14 @@ jobs:
           grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' wcp_validation/bin/wine
           grep -Fq 'vcruntime140_threads.dll' wcp_validation/bin/wine
           grep -Fq 'ucrtbase.dll' wcp_validation/bin/wine
-          grep -Fq 'regedit /S' wcp_validation/bin/wine
-          grep -Fq 'native,builtin' wcp_validation/bin/wine
+          grep -Fq 'WINEDLLOVERRIDES' wcp_validation/bin/wine
+          grep -Fq 'vcruntime140_1=n,b' wcp_validation/bin/wine
+          grep -Fq 'VC runtime WINEDLLOVERRIDES enabled' wcp_validation/bin/wine
+
+          if grep -Fq 'regedit /S' wcp_validation/bin/wine; then
+              echo "ERROR: packaged 1.8 wrapper still contains nested regedit"
+              exit 1
+          fi
           grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
 
           if grep -Fq 'SCRIPT_DIR=$(' wcp_validation/bin/wine ||              grep -Fq 'ROOT_DIR=$(' wcp_validation/bin/wine; then
@@ -1256,17 +1250,15 @@ jobs:
             '"CSMT"="disabled"' \
             "$USER_REG"
 
-          grep -Fq \
-            '"ucrtbase"="native,builtin"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"vcruntime140"="native,builtin"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"msvcp140"="native,builtin"' \
-            "$USER_REG"
+          # 1.8 must not add our VC runtime overrides persistently to
+          # the packaged registry. They are applied per launch through
+          # WINEDLLOVERRIDES by bin/wine.
+          if grep -Fq '"vcruntime140"="native,builtin"' "$USER_REG" || \
+             grep -Fq '"msvcp140"="native,builtin"' "$USER_REG" || \
+             grep -Fq '"ucrtbase"="native,builtin"' "$USER_REG"; then
+            echo "ERROR: persistent VC runtime override leaked into 1.8 prefix"
+            exit 1
+          fi
 
           grep -Fq \
             '"URL Protocol"=""' \
@@ -1282,13 +1274,13 @@ jobs:
           tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
 
           if grep -Fq '[GameNativeMapleStory216150]' packaged-wine.inf; then
-            echo "ERROR: old 1.3 live-registry wine.inf injection leaked into 1.7"
+            echo "ERROR: old 1.3 live-registry wine.inf injection leaked into 1.8"
             exit 1
           fi
 
           if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
              grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
-            echo "ERROR: broken 1.4 CopyFiles integration leaked into 1.7"
+            echo "ERROR: broken 1.4 CopyFiles integration leaked into 1.8"
             exit 1
           fi
 
@@ -1361,13 +1353,13 @@ jobs:
           echo "=========================================="
 
       # ============================================================
-      # 12. UPLOAD 1.7 WCP
+      # 12. UPLOAD 1.8 WCP
       # ============================================================
 
-      - name: Upload MapleStory full-VC-runtime WCP
+      - name: Upload MapleStory full-VC-runtime env-override WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-1.7-arm64ec
-          path: proton-11.0-1.7-arm64ec.wcp
+          name: proton-11.0-1.8-arm64ec
+          path: proton-11.0-1.8-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
