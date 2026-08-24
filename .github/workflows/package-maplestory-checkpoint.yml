@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC Direct Runtime Test
+name: Package MapleStory ARM64EC Direct Runtime Test 1.6
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-1.5-arm64ec"
-      WCP_NAME: "proton-11.0-1.5-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-1.6-arm64ec"
+      WCP_NAME: "proton-11.0-1.6-arm64ec.wcp"
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
     steps:
@@ -245,7 +245,7 @@ jobs:
       # 6. APPLY THE MAPLESTORY REGISTRY FIXES
       #
       # Keep the registry layer from 1.3 unchanged. The only new
-      # compatibility variable in 1.5 is vcruntime140_threads.dll.
+      # compatibility variable in 1.6 is vcruntime140_threads.dll.
       # NO Wine rebuild here.
       # ============================================================
 
@@ -876,72 +876,101 @@ jobs:
           #!/bin/sh
           # GameNative MapleStory 216150 vcruntime140_threads shim.
 
-          SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 50
-          ROOT_DIR=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd) || exit 51
+          # IMPORTANT: do not use command substitution here. GameNative's
+          # LD_PRELOAD evshim writes startup messages to stdout; $(...) would
+          # capture those messages and corrupt SCRIPT_DIR/ROOT_DIR.
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-1.6] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          ROOT_DIR="${SCRIPT_DIR%/*}"
           REAL_WINE="$SCRIPT_DIR/wine.real"
           RUNTIME_ROOT="$ROOT_DIR/share/wine/maplestory_vc_runtime"
 
           if [ ! -x "$REAL_WINE" ]; then
-              echo "[GN-MS-1.5] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              echo "[GN-MS-1.6] ERROR: real Wine launcher missing: $REAL_WINE" >&2
               exit 52
           fi
 
-          # Restrict the mutation to MapleStory. Test Graphics does not set
-          # SteamGameId/SteamAppId to 216150, so it passes straight through.
-          if [ "${SteamGameId:-}" = "216150" ] || [ "${SteamAppId:-}" = "216150" ]; then
-              PREFIX="${WINEPREFIX:-}"
+          # GameNative may carry the game's Steam IDs even when Test Graphics
+          # is being launched, and it appends the game's normal exec arguments
+          # after TestD3D.exe. Detect TestD3D explicitly so the cube test never
+          # mutates the prefix.
+          IS_TEST_D3D=0
+          for ARG in "$@"; do
+              case "$ARG" in
+                  *TestD3D.exe*|*testd3d.exe*)
+                      IS_TEST_D3D=1
+                      ;;
+              esac
+          done
 
-              if [ -z "$PREFIX" ]; then
-                  echo "[GN-MS-1.5] ERROR: MapleStory launch has no WINEPREFIX" >&2
-                  exit 54
-              fi
+          if [ "$IS_TEST_D3D" -eq 0 ]; then
+              if [ "${SteamGameId:-}" = "216150" ] || [ "${SteamAppId:-}" = "216150" ]; then
+                  PREFIX="${WINEPREFIX:-}"
 
-              SYS32="$PREFIX/drive_c/windows/system32"
-              WOW64="$PREFIX/drive_c/windows/syswow64"
-              SRC64="$RUNTIME_ROOT/system32/vcruntime140_threads.dll"
-              SRC32="$RUNTIME_ROOT/syswow64/vcruntime140_threads.dll"
-              MARKER="$PREFIX/.gamenative-maplestory-vcruntime140-threads-1.5"
-
-              if [ ! -s "$SRC64" ] || [ ! -s "$SRC32" ]; then
-                  echo "[GN-MS-1.5] ERROR: packaged runtime payload missing" >&2
-                  exit 55
-              fi
-
-              if [ -d "$SYS32" ] && [ -d "$WOW64" ]; then
-                  if [ ! -f "$MARKER" ]; then
-                      echo "[GN-MS-1.5] Installing vcruntime140_threads.dll into $PREFIX" >&2
-
-                      # rm first so an existing destination symlink cannot
-                      # cause cp to overwrite a Wine distribution target.
-                      rm -f "$SYS32/vcruntime140_threads.dll" || exit 57
-                      rm -f "$WOW64/vcruntime140_threads.dll" || exit 57
-
-                      cp "$SRC64" "$SYS32/vcruntime140_threads.dll" || exit 58
-                      cp "$SRC32" "$WOW64/vcruntime140_threads.dll" || exit 58
-
-                      chmod 0644 \
-                        "$SYS32/vcruntime140_threads.dll" \
-                        "$WOW64/vcruntime140_threads.dll" || exit 59
-
-                      if [ ! -s "$SYS32/vcruntime140_threads.dll" ] || \
-                         [ ! -s "$WOW64/vcruntime140_threads.dll" ]; then
-                          echo "[GN-MS-1.5] ERROR: runtime copy verification failed" >&2
-                          exit 60
-                      fi
-
-                      {
-                          echo "GameNative MapleStory runtime test 1.5"
-                          echo "SteamAppId=216150"
-                          echo "Installed=vcruntime140_threads.dll"
-                      } > "$MARKER" || exit 61
-
-                      echo "[GN-MS-1.5] Runtime install complete" >&2
-                  else
-                      echo "[GN-MS-1.5] Runtime marker already present" >&2
+                  if [ -z "$PREFIX" ]; then
+                      echo "[GN-MS-1.6] ERROR: MapleStory launch has no WINEPREFIX" >&2
+                      exit 54
                   fi
-              else
-                  # New prefixes are already covered by prefixPack.txz.
-                  echo "[GN-MS-1.5] drive_c not ready; using packaged-prefix runtime" >&2
+
+                  SYS32="$PREFIX/drive_c/windows/system32"
+                  WOW64="$PREFIX/drive_c/windows/syswow64"
+                  SRC64="$RUNTIME_ROOT/system32/vcruntime140_threads.dll"
+                  SRC32="$RUNTIME_ROOT/syswow64/vcruntime140_threads.dll"
+                  MARKER="$PREFIX/.gamenative-maplestory-vcruntime140-threads-1.6"
+
+                  if [ ! -s "$SRC64" ] || [ ! -s "$SRC32" ]; then
+                      echo "[GN-MS-1.6] ERROR: packaged runtime payload missing" >&2
+                      exit 55
+                  fi
+
+                  if [ -d "$SYS32" ] && [ -d "$WOW64" ]; then
+                      if [ ! -f "$MARKER" ]; then
+                          echo "[GN-MS-1.6] Installing vcruntime140_threads.dll into $PREFIX" >&2
+
+                          # rm first so an existing destination symlink cannot
+                          # cause cp to overwrite a Wine distribution target.
+                          rm -f "$SYS32/vcruntime140_threads.dll" || exit 57
+                          rm -f "$WOW64/vcruntime140_threads.dll" || exit 57
+
+                          cp "$SRC64" "$SYS32/vcruntime140_threads.dll" || exit 58
+                          cp "$SRC32" "$WOW64/vcruntime140_threads.dll" || exit 58
+
+                          chmod 0644 \
+                            "$SYS32/vcruntime140_threads.dll" \
+                            "$WOW64/vcruntime140_threads.dll" || exit 59
+
+                          if [ ! -s "$SYS32/vcruntime140_threads.dll" ] || \
+                             [ ! -s "$WOW64/vcruntime140_threads.dll" ]; then
+                              echo "[GN-MS-1.6] ERROR: runtime copy verification failed" >&2
+                              exit 60
+                          fi
+
+                          {
+                              echo "GameNative MapleStory runtime test 1.6"
+                              echo "SteamAppId=216150"
+                              echo "Installed=vcruntime140_threads.dll"
+                          } > "$MARKER" || exit 61
+
+                          echo "[GN-MS-1.6] Runtime install complete" >&2
+                      else
+                          echo "[GN-MS-1.6] Runtime marker already present" >&2
+                      fi
+                  else
+                      # New prefixes are already covered by prefixPack.txz.
+                      echo "[GN-MS-1.6] drive_c not ready; using packaged-prefix runtime" >&2
+                  fi
               fi
           fi
 
@@ -962,10 +991,19 @@ jobs:
           test -x "$ROOT/bin/wine.real"
           test "$(readlink "$ROOT/bin/wine.real")" = "../lib/wine/aarch64-unix/wine"
 
+          sh -n "$ROOT/bin/wine"
+
           grep -Fq 'SteamGameId:-' "$ROOT/bin/wine"
           grep -Fq '216150' "$ROOT/bin/wine"
+          grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"
+          grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' "$ROOT/bin/wine"
           grep -Fq 'vcruntime140_threads.dll' "$ROOT/bin/wine"
           grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" ||              grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: wrapper still contains stdout-capturing path command substitution"
+              exit 1
+          fi
 
           echo
           echo "Direct runtime deployment wrapper PASSED"
@@ -982,9 +1020,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-1.5-arm64ec",
+            "versionName": "11.0-1.6-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory Wine/registry fixes plus direct vcruntime140_threads deployment",
+            "description": "Proton 11 ARM64EC - MapleStory fixes plus direct vcruntime140_threads deployment, evshim-safe wrapper",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -999,7 +1037,7 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.5-arm64ec"' \
+            '"versionName": "11.0-1.6-arm64ec"' \
             profile.json
 
           echo
@@ -1101,7 +1139,7 @@ jobs:
           cat packaged-profile.json
 
           grep -Fq \
-            '"versionName": "11.0-1.5-arm64ec"' \
+            '"versionName": "11.0-1.6-arm64ec"' \
             packaged-profile.json
 
           echo
@@ -1129,9 +1167,17 @@ jobs:
           test -x wcp_validation/bin/wineserver
           test -x wcp_validation/lib/wine/aarch64-unix/wine
 
+          sh -n wcp_validation/bin/wine
           grep -Fq 'SteamGameId:-' wcp_validation/bin/wine
+          grep -Fq 'TestD3D.exe' wcp_validation/bin/wine
+          grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' wcp_validation/bin/wine
           grep -Fq 'vcruntime140_threads.dll' wcp_validation/bin/wine
           grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
+
+          if grep -Fq 'SCRIPT_DIR=$(' wcp_validation/bin/wine ||              grep -Fq 'ROOT_DIR=$(' wcp_validation/bin/wine; then
+              echo "ERROR: packaged wrapper still contains stdout-capturing path command substitution"
+              exit 1
+          fi
 
           echo "Wine wrapper/launcher validation PASSED"
 
@@ -1257,7 +1303,7 @@ jobs:
       - name: Upload MapleStory direct-runtime WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-1.5-arm64ec
-          path: proton-11.0-1.5-arm64ec.wcp
+          name: proton-11.0-1.6-arm64ec
+          path: proton-11.0-1.6-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
