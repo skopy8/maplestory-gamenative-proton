@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC Recovery to 1.6 Runtime State 2.1
+name: Package MapleStory ARM64EC VC DllOverrides Registry Recovery 2.2
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-2.1-arm64ec"
-      WCP_NAME: "proton-11.0-2.1-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-2.2-arm64ec"
+      WCP_NAME: "proton-11.0-2.2-arm64ec.wcp"
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
     steps:
@@ -735,87 +735,343 @@ jobs:
           echo "Packaged-prefix vcruntime140_threads.dll injection PASSED"
 
       # ============================================================
-      # 8. APPLY REGISTRY FIXES TO EXISTING LIVE PREFIX VIA WINE.INF
+      # 8. STAGE REGISTRY-ONLY RECOVERY FOR THE EXISTING LIVE PREFIX
+      #
+      # The failed 1.7 nested regedit may have persisted some/all of the
+      # ten VC runtime native,builtin overrides into the existing user.reg.
+      # 2.0 restored the runtime files before its guest-side cmp failure,
+      # but its wine.inf registry recovery never got a chance to run.
+      #
+      # 2.2 therefore changes ONLY those ten values in the live
+      # Software\\Wine\\DllOverrides section. It derives their exact
+      # baseline from untouched prefixPack-arm64ec-11.txz at build time.
+      #
+      # IMPORTANT:
+      #   - No nested Wine/regedit invocation.
+      #   - No wine.inf mutation.
+      #   - No WINEDLLOVERRIDES.
+      #   - No live VC runtime copying.
+      #   - No esync / DXVK / Turnip changes.
+      #   - Recovery intentionally also runs for TestD3D.
       # ============================================================
 
-      - name: Stage 2.1 live-prefix runtime recovery wrapper
+      - name: Stage 2.2 live-prefix VC DllOverrides recovery
         shell: bash
         run: |
           set -euxo pipefail
 
           ROOT="$CHECKPOINT_ROOT"
-          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
-          RECOVERY_ROOT="$ROOT/share/wine/maplestory_recovery_2_1"
+          RECOVERY_ROOT="$ROOT/share/wine/maplestory_registry_recovery_2_2"
 
           test -x "$ROOT/lib/wine/aarch64-unix/wine"
 
-          rm -rf recovery_base_extract "$RECOVERY_ROOT"
-          mkdir -p recovery_base_extract
-          tar -xJf prefixPack-base.txz -C recovery_base_extract
+          rm -rf recovery_registry_base "$RECOVERY_ROOT"
+          mkdir -p recovery_registry_base "$RECOVERY_ROOT"
 
-          BASE_DRIVE_C="$(find recovery_base_extract -type d -name drive_c -print -quit)"
-          test -n "$BASE_DRIVE_C"
+          tar -xJf prefixPack-base.txz \
+            -C recovery_registry_base
 
-          mkdir -p \
-            "$RECOVERY_ROOT/baseline/system32" \
-            "$RECOVERY_ROOT/baseline/syswow64" \
-            "$RECOVERY_ROOT/threads/system32" \
-            "$RECOVERY_ROOT/threads/syswow64"
+          BASE_USER_REG="$(find recovery_registry_base -type f -name user.reg -print -quit)"
+          test -n "$BASE_USER_REG"
+          test -s "$BASE_USER_REG"
 
-          SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll vcruntime140_threads.dll'
-          WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_threads.dll'
+          # Extract only the ten values that 1.7 attempted to force.
+          # baseline-values.txt contains the exact raw Wine-registry lines
+          # present upstream; omitted values are intentionally absent.
+          python3 - \
+            "$BASE_USER_REG" \
+            "$RECOVERY_ROOT/baseline-values.txt" \
+            "$RECOVERY_ROOT/baseline-status.txt" <<'PYBASE'
+          import re
+          import sys
+          from pathlib import Path
 
-          : > "$RECOVERY_ROOT/baseline-system32.txt"
-          : > "$RECOVERY_ROOT/baseline-syswow64.txt"
+          user_reg = Path(sys.argv[1])
+          values_out = Path(sys.argv[2])
+          status_out = Path(sys.argv[3])
 
-          for DLL in $SYS32_LIST; do
-            SRC="$BASE_DRIVE_C/windows/system32/$DLL"
-            if [ -L "$SRC" ]; then
-              echo "ERROR: unsupported symlink in upstream system32 baseline: $DLL"
-              exit 1
-            elif [ -f "$SRC" ]; then
-              cp -f "$SRC" "$RECOVERY_ROOT/baseline/system32/$DLL"
-              chmod 0644 "$RECOVERY_ROOT/baseline/system32/$DLL"
-              echo "present $DLL" >> "$RECOVERY_ROOT/baseline-system32.txt"
-            else
-              echo "absent $DLL" >> "$RECOVERY_ROOT/baseline-system32.txt"
-            fi
-          done
+          section = r"Software\\Wine\\DllOverrides"
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          target_set = set(targets)
 
-          for DLL in $WOW64_LIST; do
-            SRC="$BASE_DRIVE_C/windows/syswow64/$DLL"
-            if [ -L "$SRC" ]; then
-              echo "ERROR: unsupported symlink in upstream syswow64 baseline: $DLL"
-              exit 1
-            elif [ -f "$SRC" ]; then
-              cp -f "$SRC" "$RECOVERY_ROOT/baseline/syswow64/$DLL"
-              chmod 0644 "$RECOVERY_ROOT/baseline/syswow64/$DLL"
-              echo "present $DLL" >> "$RECOVERY_ROOT/baseline-syswow64.txt"
-            else
-              echo "absent $DLL" >> "$RECOVERY_ROOT/baseline-syswow64.txt"
-            fi
-          done
+          lines = user_reg.read_text(encoding="utf-8", errors="strict").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+          value_re = re.compile(r'^"([^"]+)"=(.*)$')
 
-          # The known-good 1.6 experiment added only this DLL in each
-          # architecture after leaving every other VC runtime file at the
-          # upstream Proton 11 prefix baseline.
-          cp -f \
-            "$PAYLOAD/system32/vcruntime140_threads.dll" \
-            "$RECOVERY_ROOT/threads/system32/vcruntime140_threads.dll"
+          in_section = False
+          found = {}
 
-          cp -f \
-            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
-            "$RECOVERY_ROOT/threads/syswow64/vcruntime140_threads.dll"
+          for line in lines:
+              match = section_re.match(line)
+              if match:
+                  in_section = match.group(1) == section
+                  continue
 
-          test -s "$RECOVERY_ROOT/threads/system32/vcruntime140_threads.dll"
-          test -s "$RECOVERY_ROOT/threads/syswow64/vcruntime140_threads.dll"
+              if not in_section:
+                  continue
 
-          echo "=== system32 upstream baseline ==="
-          cat "$RECOVERY_ROOT/baseline-system32.txt"
-          echo "=== syswow64 upstream baseline ==="
-          cat "$RECOVERY_ROOT/baseline-syswow64.txt"
+              match = value_re.match(line)
+              if not match:
+                  continue
 
-          # Preserve the original Wine launcher target separately.
+              name = match.group(1).lower()
+              if name not in target_set:
+                  continue
+
+              if name in found:
+                  raise RuntimeError(f"Duplicate upstream DllOverrides value: {name}")
+
+              found[name] = line
+
+          baseline_lines = [found[name] for name in targets if name in found]
+
+          values_out.write_text(
+              "\n".join(baseline_lines) + ("\n" if baseline_lines else ""),
+              encoding="utf-8",
+          )
+
+          status_lines = []
+          for name in targets:
+              if name in found:
+                  status_lines.append(f"present {name} {found[name]}")
+              else:
+                  status_lines.append(f"absent {name}")
+
+          status_out.write_text("\n".join(status_lines) + "\n", encoding="utf-8")
+
+          print("=== Upstream VC DllOverrides baseline ===")
+          print(status_out.read_text(encoding="utf-8"), end="")
+          PYBASE
+
+          test -f "$RECOVERY_ROOT/baseline-values.txt"
+          test -s "$RECOVERY_ROOT/baseline-status.txt"
+
+          cat > "$RECOVERY_ROOT/repair-user-reg.sh" <<'SHREPAIR'
+          #!/bin/sh
+          # Restore only the ten MapleStory VC runtime DllOverrides values in
+          # a Wine user.reg file. This intentionally uses simple POSIX shell
+          # operations available in GameNative's bionic guest.
+
+          USER_REG="$1"
+          BASELINE_VALUES="$2"
+
+          if [ -z "$USER_REG" ] || [ -z "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: repair helper missing arguments" >&2
+              exit 91
+          fi
+
+          if [ ! -f "$USER_REG" ]; then
+              echo "[GN-MS-2.2] ERROR: user.reg not found: $USER_REG" >&2
+              exit 92
+          fi
+
+          if [ ! -f "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: baseline-values.txt missing: $BASELINE_VALUES" >&2
+              exit 93
+          fi
+
+          TMP="${USER_REG}.gamenative-2.2.tmp"
+          rm -f "$TMP" || exit 94
+          : > "$TMP" || exit 94
+
+          IN_SECTION=0
+          SECTION_FOUND=0
+
+          while IFS= read -r LINE || [ -n "$LINE" ]; do
+              case "$LINE" in
+                  '[Software\\Wine\\DllOverrides]'*)
+                      printf '%s\n' "$LINE" >> "$TMP" || exit 94
+                      if [ -s "$BASELINE_VALUES" ]; then
+                          cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+                      fi
+                      IN_SECTION=1
+                      SECTION_FOUND=1
+                      continue
+                      ;;
+                  '['*)
+                      IN_SECTION=0
+                      ;;
+              esac
+
+              if [ "$IN_SECTION" -eq 1 ]; then
+                  case "$LINE" in
+                      \"[Cc][Oo][Nn][Cc][Rr][Tt]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_1\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_2\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Aa][Tt][Oo][Mm][Ii][Cc]_[Ww][Aa][Ii][Tt]\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Cc][Oo][Dd][Ee][Cc][Vv][Tt]_[Ii][Dd][Ss]\"=*|\
+                      \"[Uu][Cc][Rr][Tt][Bb][Aa][Ss][Ee]\"=*|\
+                      \"[Vv][Cc][Oo][Mm][Pp]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140_1\"=*)
+                          # Drop the live value. The exact upstream baseline
+                          # value (if one exists) was inserted at section start.
+                          continue
+                          ;;
+                  esac
+              fi
+
+              printf '%s\n' "$LINE" >> "$TMP" || exit 94
+          done < "$USER_REG"
+
+          # If the live hive had no DllOverrides section but upstream has one
+          # or more of our target values, append only those baseline values.
+          if [ "$SECTION_FOUND" -eq 0 ] && [ -s "$BASELINE_VALUES" ]; then
+              printf '\n[Software\\\\Wine\\\\DllOverrides]\n' >> "$TMP" || exit 94
+              cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+          fi
+
+          # Preserve user.reg's existing inode/mode by truncating and rewriting
+          # the original file instead of replacing it with mv.
+          cat "$TMP" > "$USER_REG" || exit 95
+          rm -f "$TMP" || exit 95
+
+          exit 0
+          SHREPAIR
+
+          chmod 755 "$RECOVERY_ROOT/repair-user-reg.sh"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
+
+          # ----------------------------------------------------------
+          # Build-time simulation of the exact repair helper.
+          # Create a synthetic live user.reg with all ten 1.7 values forced
+          # to native,builtin plus an unrelated sentinel override, run the
+          # helper, then verify the ten values exactly match upstream and the
+          # sentinel survives.
+          # ----------------------------------------------------------
+
+          cp "$BASE_USER_REG" recovery-user-reg-test.reg
+
+          python3 - recovery-user-reg-test.reg <<'PYCONTAM'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          section = r"Software\\Wine\\DllOverrides"
+          forced = {
+              "concrt140": "native,builtin",
+              "msvcp140": "native,builtin",
+              "msvcp140_1": "native,builtin",
+              "msvcp140_2": "native,builtin",
+              "msvcp140_atomic_wait": "native,builtin",
+              "msvcp140_codecvt_ids": "native,builtin",
+              "ucrtbase": "native,builtin",
+              "vcomp140": "native,builtin",
+              "vcruntime140": "native,builtin",
+              "vcruntime140_1": "native,builtin",
+              "gamenative_2_2_sentinel": "builtin",
+          }
+
+          lines = path.read_text(encoding="utf-8").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+          start = None
+          end = None
+          for i, line in enumerate(lines):
+              m = section_re.match(line)
+              if m and m.group(1) == section:
+                  start = i
+                  end = len(lines)
+                  for j in range(i + 1, len(lines)):
+                      if section_re.match(lines[j]):
+                          end = j
+                          break
+                  break
+
+          entries = [f'"{name}"="{value}"' for name, value in forced.items()]
+
+          if start is None:
+              if lines and lines[-1] != "":
+                  lines.append("")
+              lines.append(f"[{section}]")
+              lines.extend(entries)
+          else:
+              target_names = {name.lower() for name in forced}
+              kept = []
+              for line in lines[start + 1:end]:
+                  m = re.match(r'^"([^"]+)"=', line)
+                  if m and m.group(1).lower() in target_names:
+                      continue
+                  kept.append(line)
+              lines[start + 1:end] = entries + kept
+
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PYCONTAM
+
+          "$RECOVERY_ROOT/repair-user-reg.sh" \
+            recovery-user-reg-test.reg \
+            "$RECOVERY_ROOT/baseline-values.txt"
+
+          python3 - \
+            "$BASE_USER_REG" \
+            recovery-user-reg-test.reg <<'PYVERIFY'
+          import re
+          import sys
+          from pathlib import Path
+
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          section = r"Software\\Wine\\DllOverrides"
+
+          def read_values(path):
+              lines = Path(path).read_text(encoding="utf-8").splitlines()
+              section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+              value_re = re.compile(r'^"([^"]+)"=(.*)$')
+              in_section = False
+              values = {}
+              for line in lines:
+                  m = section_re.match(line)
+                  if m:
+                      in_section = m.group(1) == section
+                      continue
+                  if not in_section:
+                      continue
+                  m = value_re.match(line)
+                  if m:
+                      values[m.group(1).lower()] = line
+              return values
+
+          base = read_values(sys.argv[1])
+          repaired = read_values(sys.argv[2])
+
+          for name in targets:
+              if base.get(name) != repaired.get(name):
+                  raise RuntimeError(
+                      f"Repair mismatch for {name}: upstream={base.get(name)!r} repaired={repaired.get(name)!r}"
+                  )
+
+          sentinel = repaired.get("gamenative_2_2_sentinel")
+          if sentinel != '"gamenative_2_2_sentinel"="builtin"':
+              raise RuntimeError(f"Unrelated sentinel was not preserved: {sentinel!r}")
+
+          print("Synthetic live-user.reg recovery simulation PASSED")
+          PYVERIFY
+
+          # Preserve the original Wine launcher as wine.real and install the
+          # thin one-time live-registry recovery wrapper.
           test -L "$ROOT/bin/wine"
           test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
 
@@ -823,15 +1079,14 @@ jobs:
           ln -s ../lib/wine/aarch64-unix/wine "$ROOT/bin/wine.real"
           rm -f "$ROOT/bin/wine"
 
-          cat > "$ROOT/bin/wine" <<'SH'
+          cat > "$ROOT/bin/wine" <<'SHWRAP'
           #!/bin/sh
-          # GameNative MapleStory 216150 recovery shim (2.1).
-          # Restore files overwritten by the failed full-VC-runtime tests back
-          # to the untouched Proton 11 prefix baseline, then add ONLY
-          # vcruntime140_threads.dll as in known-good 1.6.
+          # GameNative MapleStory 216150 registry-only recovery shim (2.2).
+          # Repair the ten VC DllOverrides values potentially persisted by the
+          # failed 1.7 regedit attempt, then immediately launch the real Wine.
 
-          # Do not use command substitution here. GameNative's LD_PRELOAD
-          # evshim writes startup messages to stdout and would corrupt it.
+          # Do not use command substitution. GameNative's LD_PRELOAD evshim
+          # writes startup messages to stdout and can corrupt captured output.
           case "$0" in
               /*)
                   SCRIPT_PATH="$0"
@@ -840,7 +1095,7 @@ jobs:
                   SCRIPT_PATH="$PWD/$0"
                   ;;
               *)
-                  echo "[GN-MS-2.1] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  echo "[GN-MS-2.2] ERROR: Wine wrapper was invoked without a path: $0" >&2
                   exit 50
                   ;;
           esac
@@ -848,112 +1103,58 @@ jobs:
           SCRIPT_DIR="${SCRIPT_PATH%/*}"
           ROOT_DIR="${SCRIPT_DIR%/*}"
           REAL_WINE="$SCRIPT_DIR/wine.real"
-          RECOVERY_ROOT="$ROOT_DIR/share/wine/maplestory_recovery_2_1"
+          RECOVERY_ROOT="$ROOT_DIR/share/wine/maplestory_registry_recovery_2_2"
+          REPAIR_SCRIPT="$RECOVERY_ROOT/repair-user-reg.sh"
+          BASELINE_VALUES="$RECOVERY_ROOT/baseline-values.txt"
 
           if [ ! -x "$REAL_WINE" ]; then
-              echo "[GN-MS-2.1] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              echo "[GN-MS-2.2] ERROR: real Wine launcher missing: $REAL_WINE" >&2
               exit 52
           fi
 
-          IS_TEST_D3D=0
-          for ARG in "$@"; do
-              case "$ARG" in
-                  *TestD3D.exe*|*testd3d.exe*)
-                      IS_TEST_D3D=1
-                      ;;
-              esac
-          done
+          PREFIX="${WINEPREFIX:-}"
 
-          if [ "$IS_TEST_D3D" -eq 0 ]; then
-              if [ "${SteamGameId:-}" = "216150" ] || [ "${SteamAppId:-}" = "216150" ]; then
-                  PREFIX="${WINEPREFIX:-}"
+          if [ -n "$PREFIX" ]; then
+              USER_REG="$PREFIX/user.reg"
+              MARKER="$PREFIX/.gamenative-maplestory-dlloverrides-recovery-2.2"
 
-                  if [ -z "$PREFIX" ]; then
-                      echo "[GN-MS-2.1] ERROR: MapleStory launch has no WINEPREFIX" >&2
-                      exit 54
-                  fi
-
-                  SYS32="$PREFIX/drive_c/windows/system32"
-                  WOW64="$PREFIX/drive_c/windows/syswow64"
-                  MARKER="$PREFIX/.gamenative-maplestory-recovery-2.1"
-
-                  SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll vcruntime140_threads.dll'
-                  WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_threads.dll'
-
-                  if [ -d "$SYS32" ] && [ -d "$WOW64" ]; then
-                      if [ ! -f "$MARKER" ]; then
-                          echo "[GN-MS-2.1] Restoring VC runtime files to Proton 11 baseline in $PREFIX" >&2
-
-                          for DLL in $SYS32_LIST; do
-                              SRC="$RECOVERY_ROOT/baseline/system32/$DLL"
-                              DST="$SYS32/$DLL"
-                              rm -f "$DST" || exit 70
-                              if [ -f "$SRC" ]; then
-                                  cp "$SRC" "$DST" || exit 71
-                                  chmod 0644 "$DST" || exit 72
-                                  [ -s "$DST" ] || exit 73
-                              fi
-                          done
-
-                          for DLL in $WOW64_LIST; do
-                              SRC="$RECOVERY_ROOT/baseline/syswow64/$DLL"
-                              DST="$WOW64/$DLL"
-                              rm -f "$DST" || exit 74
-                              if [ -f "$SRC" ]; then
-                                  cp "$SRC" "$DST" || exit 75
-                                  chmod 0644 "$DST" || exit 76
-                                  [ -s "$DST" ] || exit 77
-                              fi
-                          done
-
-                          SRC64="$RECOVERY_ROOT/threads/system32/vcruntime140_threads.dll"
-                          SRC32="$RECOVERY_ROOT/threads/syswow64/vcruntime140_threads.dll"
-
-                          if [ ! -s "$SRC64" ] || [ ! -s "$SRC32" ]; then
-                              echo "[GN-MS-2.1] ERROR: threads-only runtime payload missing" >&2
-                              exit 78
-                          fi
-
-                          rm -f "$SYS32/vcruntime140_threads.dll" || exit 79
-                          rm -f "$WOW64/vcruntime140_threads.dll" || exit 79
-                          cp "$SRC64" "$SYS32/vcruntime140_threads.dll" || exit 80
-                          cp "$SRC32" "$WOW64/vcruntime140_threads.dll" || exit 80
-                          chmod 0644 \
-                            "$SYS32/vcruntime140_threads.dll" \
-                            "$WOW64/vcruntime140_threads.dll" || exit 81
-                          [ -s "$SYS32/vcruntime140_threads.dll" ] || exit 82
-                          [ -s "$WOW64/vcruntime140_threads.dll" ] || exit 82
-
-                          # 1.7 can leave this temporary file behind because
-                          # it aborted at regedit before reaching its cleanup.
-                          rm -f "$PREFIX/drive_c/gamenative-maplestory-vc-runtime-1.7.reg" || true
-
-                          {
-                              echo "GameNative MapleStory recovery 2.1"
-                              echo "SteamAppId=216150"
-                              echo "Restored=1.7 full-runtime file set to upstream Proton 11 prefix baseline"
-                              echo "Added=vcruntime140_threads.dll only"
-                              echo "DllOverrides=unchanged by 2.1"
-                          } > "$MARKER" || exit 83
-
-                          echo "[GN-MS-2.1] Runtime recovery complete; 1.6 files-only state restored" >&2
-                      else
-                          echo "[GN-MS-2.1] Recovery marker already present; 1.6 runtime state retained" >&2
+              if [ -f "$USER_REG" ]; then
+                  if [ ! -f "$MARKER" ]; then
+                      if [ ! -x "$REPAIR_SCRIPT" ] || [ ! -f "$BASELINE_VALUES" ]; then
+                          echo "[GN-MS-2.2] ERROR: packaged registry recovery payload missing" >&2
+                          exit 90
                       fi
+
+                      echo "[GN-MS-2.2] Restoring VC DllOverrides baseline in $USER_REG" >&2
+
+                      "$REPAIR_SCRIPT" "$USER_REG" "$BASELINE_VALUES" || exit $?
+
+                      {
+                          echo "GameNative MapleStory VC DllOverrides recovery 2.2"
+                          echo "Recovered=concrt140,msvcp140,msvcp140_1,msvcp140_2,msvcp140_atomic_wait,msvcp140_codecvt_ids,ucrtbase,vcomp140,vcruntime140,vcruntime140_1"
+                          echo "Source=untouched prefixPack-arm64ec-11.txz baseline"
+                          echo "RuntimeFiles=unchanged by 2.2 live recovery"
+                          echo "WineInf=unchanged"
+                      } > "$MARKER" || exit 96
+
+                      echo "[GN-MS-2.2] Registry recovery complete; VC DllOverrides match Proton 11 baseline" >&2
                   else
-                      # Fresh prefixes are already represented by prefixPack.txz.
-                      echo "[GN-MS-2.1] drive_c not ready; using packaged recovery prefix" >&2
+                      echo "[GN-MS-2.2] Registry recovery marker already present" >&2
                   fi
+              else
+                  # A genuinely new prefix will use the already-patched
+                  # prefixPack.txz; do not block Wine initialization.
+                  echo "[GN-MS-2.2] user.reg not ready; deferring live registry recovery" >&2
               fi
           fi
 
           exec "$REAL_WINE" "$@"
-          SH
+          SHWRAP
 
           chmod 755 "$ROOT/bin/wine"
 
           echo
-          echo "=== Validate recovery wrapper ==="
+          echo "=== Validate 2.2 registry recovery wrapper ==="
 
           test -f "$ROOT/bin/wine"
           test ! -L "$ROOT/bin/wine"
@@ -964,22 +1165,30 @@ jobs:
           test "$(readlink "$ROOT/bin/wine.real")" = "../lib/wine/aarch64-unix/wine"
 
           sh -n "$ROOT/bin/wine"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
 
-          grep -Fq 'SteamGameId:-' "$ROOT/bin/wine"
-          grep -Fq '216150' "$ROOT/bin/wine"
-          grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"
-          grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' "$ROOT/bin/wine"
-          grep -Fq 'Restoring VC runtime files to Proton 11 baseline' "$ROOT/bin/wine"
-          grep -Fq 'vcruntime140_threads.dll' "$ROOT/bin/wine"
+          grep -Fq 'Restoring VC DllOverrides baseline' "$ROOT/bin/wine"
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' "$ROOT/bin/wine"
+          grep -Fq 'repair-user-reg.sh' "$ROOT/bin/wine"
           grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
 
+          if grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"; then
+              echo "ERROR: 2.2 must not bypass registry recovery for TestD3D"
+              exit 1
+          fi
+
           if grep -Fq 'WINEDLLOVERRIDES' "$ROOT/bin/wine"; then
-              echo "ERROR: 1.8 WINEDLLOVERRIDES logic leaked into 2.1"
+              echo "ERROR: WINEDLLOVERRIDES leaked into 2.2"
               exit 1
           fi
 
           if grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
-              echo "ERROR: 1.7 nested regedit leaked into 2.1"
+              echo "ERROR: nested regedit leaked into 2.2"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$ROOT/bin/wine"; then
+              echo "ERROR: guest wrapper depends on cmp"
               exit 1
           fi
 
@@ -990,10 +1199,10 @@ jobs:
           fi
 
           echo
-          echo "2.1 live-prefix recovery wrapper PASSED"
+          echo "2.2 live-prefix registry-only recovery wrapper PASSED"
 
       # ============================================================
-      # 10. CREATE NEW 2.1 GAMENATIVE PROFILE
+      # 9. CREATE NEW 2.2 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -1004,9 +1213,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-2.1-arm64ec",
+            "versionName": "11.0-2.2-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory 2.1 recovery: restore upstream VC runtime baseline plus vcruntime140_threads only; no guest cmp and no wine.inf mutation",
+            "description": "Proton 11 ARM64EC - MapleStory 2.2 registry-only recovery: restore ten VC DllOverrides to untouched Proton 11 baseline; no live runtime copy, no wine.inf, no regedit",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -1016,19 +1225,16 @@ jobs:
           }
           EOF
 
-          echo "=== Generated profile ==="
-
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-2.1-arm64ec"' \
+            '"versionName": "11.0-2.2-arm64ec"' \
             profile.json
 
-          echo
           echo "Profile validation PASSED"
 
       # ============================================================
-      # 11. BUILD THE NEW WCP
+      # 10. BUILD THE NEW WCP
       # ============================================================
 
       - name: Build WCP
@@ -1044,17 +1250,6 @@ jobs:
           cp profile.json \
             "$ROOT/profile.json"
 
-          echo "=== Package inputs ==="
-
-          ls -ld \
-            "$ROOT/bin" \
-            "$ROOT/lib" \
-            "$ROOT/share"
-
-          ls -lh \
-            "$ROOT/prefixPack.txz" \
-            "$ROOT/profile.json"
-
           cd "$ROOT"
 
           tar cJf \
@@ -1065,13 +1260,10 @@ jobs:
             prefixPack.txz \
             profile.json
 
-          echo
-          echo "=== WCP created ==="
-
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
       # ============================================================
-      # 12. VALIDATE FINAL WCP
+      # 11. VALIDATE FINAL 2.2 WCP
       # ============================================================
 
       - name: Validate final WCP
@@ -1083,28 +1275,18 @@ jobs:
 
           test -f "$WCP"
           test -s "$WCP"
-
-          echo "=== WCP ==="
-          ls -lh "$WCP"
-
-          echo
-          echo "=== XZ integrity ==="
-
           xz -t "$WCP"
 
-          echo "XZ integrity PASSED"
-
-          echo
-          echo "=== Archive listing ==="
-
-          tar tJf "$WCP" \
-            > wcp-files.txt
+          tar tJf "$WCP" > wcp-files.txt
 
           for f in \
             bin/wine \
             bin/wine.real \
             bin/wineserver \
             lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh \
             prefixPack.txz \
             profile.json
           do
@@ -1112,22 +1294,10 @@ jobs:
             echo "FOUND: $f"
           done
 
-          echo
-          echo "=== Packaged profile ==="
-
-          tar xJOf \
-            "$WCP" \
-            profile.json \
-            > packaged-profile.json
-
-          cat packaged-profile.json
-
+          tar xJOf "$WCP" profile.json > packaged-profile.json
           grep -Fq \
-            '"versionName": "11.0-2.1-arm64ec"' \
+            '"versionName": "11.0-2.2-arm64ec"' \
             packaged-profile.json
-
-          echo
-          echo "=== Validate Wine launcher chain ==="
 
           rm -rf wcp_validation
           mkdir -p wcp_validation
@@ -1137,169 +1307,94 @@ jobs:
             bin/wine \
             bin/wine.real \
             bin/wineserver \
-            lib/wine/aarch64-unix/wine
+            lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
 
           test -f wcp_validation/bin/wine
           test ! -L wcp_validation/bin/wine
           test -x wcp_validation/bin/wine
-
           test -L wcp_validation/bin/wine.real
           test -e wcp_validation/bin/wine.real
           test -x wcp_validation/bin/wine.real
           test "$(readlink wcp_validation/bin/wine.real)" = "../lib/wine/aarch64-unix/wine"
-
           test -x wcp_validation/bin/wineserver
           test -x wcp_validation/lib/wine/aarch64-unix/wine
+          test -x wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
 
           sh -n wcp_validation/bin/wine
-          grep -Fq 'SteamGameId:-' wcp_validation/bin/wine
-          grep -Fq 'TestD3D.exe' wcp_validation/bin/wine
-          grep -Fq 'SCRIPT_DIR="${SCRIPT_PATH%/*}"' wcp_validation/bin/wine
-          grep -Fq 'Restoring VC runtime files to Proton 11 baseline' wcp_validation/bin/wine
-          grep -Fq 'vcruntime140_threads.dll' wcp_validation/bin/wine
+          sh -n wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          grep -Fq 'Restoring VC DllOverrides baseline' wcp_validation/bin/wine
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' wcp_validation/bin/wine
           grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
 
-          if grep -Fq 'SCRIPT_DIR=$(' wcp_validation/bin/wine ||              grep -Fq 'ROOT_DIR=$(' wcp_validation/bin/wine; then
-              echo "ERROR: packaged wrapper still contains stdout-capturing path command substitution"
+          if grep -Fq 'TestD3D.exe' wcp_validation/bin/wine; then
+              echo "ERROR: packaged 2.2 wrapper bypasses TestD3D"
               exit 1
           fi
 
           if grep -Fq 'WINEDLLOVERRIDES' wcp_validation/bin/wine; then
-              echo "ERROR: packaged wrapper contains 1.8 WINEDLLOVERRIDES logic"
+              echo "ERROR: packaged wrapper contains WINEDLLOVERRIDES"
               exit 1
           fi
 
           if grep -Fq 'regedit /S' wcp_validation/bin/wine; then
-              echo "ERROR: packaged wrapper contains 1.7 nested regedit"
+              echo "ERROR: packaged wrapper contains nested regedit"
               exit 1
           fi
 
           if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/bin/wine; then
-              echo "ERROR: packaged guest wrapper depends on cmp, which is absent in GameNative bionic image"
+              echo "ERROR: packaged guest wrapper depends on cmp"
               exit 1
           fi
 
-          echo "Wine wrapper/launcher validation PASSED"
+          echo "=== Packaged upstream DllOverrides baseline ==="
+          cat wcp_validation/share/wine/maplestory_registry_recovery_2_2/baseline-status.txt
 
-          echo
-          echo "=== Validate patched prefix inside final WCP ==="
-
-          tar xJOf \
-            "$WCP" \
-            prefixPack.txz \
-            > packaged-prefix.txz
-
-          rm -rf packaged_prefix
-          mkdir -p packaged_prefix
-
-          tar xJf packaged-prefix.txz \
-            -C packaged_prefix
-
-          USER_REG="$(find packaged_prefix -type f -name user.reg -print -quit)"
-          SYSTEM_REG="$(find packaged_prefix -type f -name system.reg -print -quit)"
-
-          test -n "$USER_REG"
-          test -n "$SYSTEM_REG"
-
-          echo "user.reg:   $USER_REG"
-          echo "system.reg: $SYSTEM_REG"
-
-          grep -Fq \
-            '"UseTakeFocus"="N"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"UseLinuxInputEvents"="Y"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"KeyboardUseNonExclusive"="Y"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"MouseUseNonExclusive"="Y"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"Version"="win10"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"cb_access_map_w"=dword:00000001' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"CSMT"="disabled"' \
-            "$USER_REG"
-
-          grep -Fq \
-            '"URL Protocol"=""' \
-            "$SYSTEM_REG"
-
-          echo
-          echo "Packaged MapleStory registry validation PASSED"
-
-          echo
-          echo "=== Validate wine.inf was NOT used for 2.1 live-prefix recovery ==="
-
+          # Confirm 2.2 did not mutate wine.inf for live-prefix recovery.
           grep -Fxq 'share/wine/wine.inf' wcp-files.txt
           tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
 
-          if grep -Fq '[GameNativeMapleStory216150Recovery20]' packaged-wine.inf || \
-             grep -Fq '[GameNativeMapleStory216150Recovery21]' packaged-wine.inf; then
-            echo "ERROR: live-prefix recovery section leaked into wine.inf"
-            exit 1
+          if grep -Fq 'GameNativeMapleStory216150Recovery' packaged-wine.inf; then
+              echo "ERROR: live registry recovery leaked into wine.inf"
+              exit 1
           fi
 
-          echo "wine.inf live-prefix recovery mutation is absent"
-
-          echo
-          echo "=== Validate 2.1 recovery payload inside final WCP ==="
-
-          for f in \
-            share/wine/maplestory_recovery_2_1/threads/system32/vcruntime140_threads.dll \
-            share/wine/maplestory_recovery_2_1/threads/syswow64/vcruntime140_threads.dll \
-            share/wine/maplestory_recovery_2_1/baseline-system32.txt \
-            share/wine/maplestory_recovery_2_1/baseline-syswow64.txt
-          do
-            grep -Fxq "$f" wcp-files.txt
-            echo "FOUND: $f"
-          done
-
-          # Safety check: the broken 1.4 CopyFiles mechanism must be absent.
-          if grep -Fq 'MapleVCRuntime64' packaged-wine.inf; then
-            echo "ERROR: MapleVCRuntime64 wine.inf integration leaked into 2.1"
-            exit 1
+          if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
+             grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
+              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 2.2"
+              exit 1
           fi
 
-          if grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
-            echo "ERROR: MapleVCRuntime32 wine.inf integration leaked into 2.1"
-            exit 1
-          fi
-
-          echo
-          echo "=== Validate vcruntime140_threads.dll inside packaged prefix ==="
-
-          PREFIX_DRIVE_C="$(find packaged_prefix -type d -name drive_c -print -quit)"
-          test -n "$PREFIX_DRIVE_C"
-
-          test -s \
-            "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
-
-          test -s \
-            "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
-
-          echo "Packaged/direct runtime validation PASSED"
-
-          echo
-          echo "=== Verify packaged prefix matches upstream VC baseline except threads DLL ==="
-
-          rm -rf packaged_base_prefix
-          mkdir -p packaged_base_prefix
+          # Packaged prefix remains the controlled 1.6-compatible state for
+          # genuinely new prefixes: MapleStory registry fixes plus only
+          # vcruntime140_threads.dll added to the untouched VC file baseline.
+          tar xJOf "$WCP" prefixPack.txz > packaged-prefix.txz
+          rm -rf packaged_prefix packaged_base_prefix
+          mkdir -p packaged_prefix packaged_base_prefix
+          tar xJf packaged-prefix.txz -C packaged_prefix
           tar xJf prefixPack-base.txz -C packaged_base_prefix
 
+          PREFIX_DRIVE_C="$(find packaged_prefix -type d -name drive_c -print -quit)"
           BASE_DRIVE_C="$(find packaged_base_prefix -type d -name drive_c -print -quit)"
+          USER_REG="$(find packaged_prefix -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find packaged_prefix -type f -name system.reg -print -quit)"
+
+          test -n "$PREFIX_DRIVE_C"
           test -n "$BASE_DRIVE_C"
+          test -n "$USER_REG"
+          test -n "$SYSTEM_REG"
+
+          grep -Fq '"UseTakeFocus"="N"' "$USER_REG"
+          grep -Fq '"UseLinuxInputEvents"="Y"' "$USER_REG"
+          grep -Fq '"KeyboardUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"MouseUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"Version"="win10"' "$USER_REG"
+          grep -Fq '"cb_access_map_w"=dword:00000001' "$USER_REG"
+          grep -Fq '"CSMT"="disabled"' "$USER_REG"
+          grep -Fq '"URL Protocol"=""' "$SYSTEM_REG"
 
           SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll'
           WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll'
@@ -1326,30 +1421,30 @@ jobs:
             fi
           done
 
-          cmp -s             "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/system32/vcruntime140_threads.dll"             "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/system32/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
 
-          cmp -s             "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/vcruntime140_threads.dll"             "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
 
-          echo "Packaged prefix exactly matches upstream VC baseline + threads-only injection"
-
-          echo
-          echo "=== Final SHA256 ==="
+          echo "Packaged prefix validation PASSED"
 
           sha256sum "$WCP"
 
-          echo
           echo "=========================================="
-          echo "WCP validation PASSED"
+          echo "2.2 WCP validation PASSED"
           echo "=========================================="
 
       # ============================================================
-      # 13. UPLOAD 2.1 WCP
+      # 12. UPLOAD 2.2 WCP
       # ============================================================
 
-      - name: Upload MapleStory 2.1 recovery WCP
+      - name: Upload MapleStory 2.2 registry recovery WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-2.1-arm64ec
-          path: proton-11.0-2.1-arm64ec.wcp
+          name: proton-11.0-2.2-arm64ec
+          path: proton-11.0-2.2-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
