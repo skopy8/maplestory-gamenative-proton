@@ -1,4 +1,4 @@
-name: Package MapleStory ARM64EC 2.3 - 2.2 Recovery Baseline + MapleStory Esync Off
+name: Package MapleStory ARM64EC Full VC Runtime Files-Only Self-Recovering 2.4
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      CUSTOM_VERSION: "11.0-2.3-arm64ec"
-      WCP_NAME: "proton-11.0-2.3-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-2.4-arm64ec"
+      WCP_NAME: "proton-11.0-2.4-arm64ec.wcp"
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
     steps:
@@ -742,22 +742,20 @@ jobs:
       # 2.0 restored the runtime files before its guest-side cmp failure,
       # but its wine.inf registry recovery never got a chance to run.
       #
-      # 2.3 RETAINS the exact 2.2 recovery for those ten values in the live
-      # Software\\Wine\\DllOverrides section, using the untouched
-      # prefixPack-arm64ec-11.txz baseline. The only new runtime variable is
-      # WINEESYNC=0 for normal MapleStory 216150 launches.
+      # 2.2 therefore changes ONLY those ten values in the live
+      # Software\\Wine\\DllOverrides section. It derives their exact
+      # baseline from untouched prefixPack-arm64ec-11.txz at build time.
       #
       # IMPORTANT:
       #   - No nested Wine/regedit invocation.
       #   - No wine.inf mutation.
       #   - No WINEDLLOVERRIDES.
       #   - No live VC runtime copying.
-      #   - DXVK / Turnip unchanged.
-      #   - 2.2 registry recovery still runs for TestD3D if its marker is absent.
-      #   - WINEESYNC=0 is applied only after TestD3D is excluded.
+      #   - No esync / DXVK / Turnip changes.
+      #   - Recovery intentionally also runs for TestD3D.
       # ============================================================
 
-      - name: "Stage 2.3 wrapper: retain 2.2 registry recovery + disable esync for MapleStory only"
+      - name: Stage 2.2 live-prefix VC DllOverrides recovery
         shell: bash
         run: |
           set -euxo pipefail
@@ -1083,10 +1081,9 @@ jobs:
 
           cat > "$ROOT/bin/wine" <<'SHWRAP'
           #!/bin/sh
-          # GameNative MapleStory 216150 compatibility shim (2.3).
-          # Keep the known-good 2.2 VC DllOverrides recovery behavior, then
-          # disable esync ONLY for the normal MapleStory 216150 launch.
-          # TestD3D is deliberately left with GameNative's original esync state.
+          # GameNative MapleStory 216150 registry-only recovery shim (2.2).
+          # Repair the ten VC DllOverrides values potentially persisted by the
+          # failed 1.7 regedit attempt, then immediately launch the real Wine.
 
           # Do not use command substitution. GameNative's LD_PRELOAD evshim
           # writes startup messages to stdout and can corrupt captured output.
@@ -1151,60 +1148,13 @@ jobs:
               fi
           fi
 
-          # ----------------------------------------------------------
-          # 2.3 controlled A/B variable: disable esync for MapleStory only.
-          #
-          # GameNative's Test Graphics command carries Steam App ID 216150 and
-          # even appends MapleStory's normal exec arguments, so App ID alone is
-          # not enough. Scan every argument first and explicitly exempt TestD3D.
-          # ----------------------------------------------------------
-          IS_TEST_D3D=0
-          for ARG in "$@"; do
-              case "$ARG" in
-                  *TestD3D.exe*|*testd3d.exe*|*TESTD3D.EXE*)
-                      IS_TEST_D3D=1
-                      ;;
-              esac
-          done
-
-          IS_MAPLESTORY=0
-          case "${SteamAppId:-}" in
-              216150) IS_MAPLESTORY=1 ;;
-          esac
-          case "${SteamGameId:-}" in
-              216150) IS_MAPLESTORY=1 ;;
-          esac
-          case "${STEAM_COMPAT_APP_ID:-}" in
-              216150) IS_MAPLESTORY=1 ;;
-          esac
-
-          # Fallback for launchers that omit Steam App ID from the environment.
-          # Do this only after TestD3D has been positively excluded.
-          if [ "$IS_TEST_D3D" -eq 0 ] && [ "$IS_MAPLESTORY" -eq 0 ]; then
-              for ARG in "$@"; do
-                  case "$ARG" in
-                      *nxsteam.exe*|*NXSTEAM.EXE*)
-                          IS_MAPLESTORY=1
-                          ;;
-                  esac
-              done
-          fi
-
-          if [ "$IS_TEST_D3D" -eq 0 ] && [ "$IS_MAPLESTORY" -eq 1 ]; then
-              WINEESYNC=0
-              export WINEESYNC
-              echo "[GN-MS-2.3] MapleStory launch detected; WINEESYNC=0" >&2
-          elif [ "$IS_TEST_D3D" -eq 1 ]; then
-              echo "[GN-MS-2.3] TestD3D detected; preserving original esync state" >&2
-          fi
-
           exec "$REAL_WINE" "$@"
           SHWRAP
 
           chmod 755 "$ROOT/bin/wine"
 
           echo
-          echo "=== Validate 2.3 registry recovery + MapleStory-only esync wrapper ==="
+          echo "=== Validate 2.2 registry recovery wrapper ==="
 
           test -f "$ROOT/bin/wine"
           test ! -L "$ROOT/bin/wine"
@@ -1222,30 +1172,18 @@ jobs:
           grep -Fq 'repair-user-reg.sh' "$ROOT/bin/wine"
           grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
 
-          grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"
-          grep -Fq 'WINEESYNC=0' "$ROOT/bin/wine"
-          grep -Fq 'MapleStory launch detected; WINEESYNC=0' "$ROOT/bin/wine"
-          grep -Fq 'TestD3D detected; preserving original esync state' "$ROOT/bin/wine"
-
-          python3 - "$ROOT/bin/wine" <<'PYORDER'
-          import sys
-          from pathlib import Path
-          text = Path(sys.argv[1]).read_text(encoding='utf-8')
-          guard = text.index('IS_TEST_D3D=0')
-          set_esync = text.index('WINEESYNC=0')
-          exec_real = text.index('exec "$REAL_WINE" "$@"')
-          if not (guard < set_esync < exec_real):
-              raise SystemExit('ERROR: TestD3D guard / WINEESYNC / exec ordering is wrong')
-          print('TestD3D guard precedes MapleStory-only WINEESYNC override')
-          PYORDER
+          if grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"; then
+              echo "ERROR: 2.2 must not bypass registry recovery for TestD3D"
+              exit 1
+          fi
 
           if grep -Fq 'WINEDLLOVERRIDES' "$ROOT/bin/wine"; then
-              echo "ERROR: WINEDLLOVERRIDES leaked into 2.3"
+              echo "ERROR: WINEDLLOVERRIDES leaked into 2.2"
               exit 1
           fi
 
           if grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
-              echo "ERROR: nested regedit leaked into 2.3"
+              echo "ERROR: nested regedit leaked into 2.2"
               exit 1
           fi
 
@@ -1261,10 +1199,430 @@ jobs:
           fi
 
           echo
-          echo "2.3 live-prefix recovery + MapleStory-only esync wrapper PASSED"
+          echo "2.2 live-prefix registry-only recovery wrapper PASSED"
 
       # ============================================================
-      # 9. CREATE NEW 2.3 GAMENATIVE PROFILE
+      # 9. STAGE THE CLEAN FULL VC RUNTIME FILES-ONLY A/B TEST
+      #    WITH A BUILT-IN TESTD3D RECOVERY PATH
+      #
+      # 2.4 deliberately keeps the proven 2.2 registry recovery layer
+      # untouched. The ONLY new MapleStory compatibility variable is the
+      # complete VC runtime file payload copied into the live prefix.
+      #
+      # Normal Steam App 216150 launch:
+      #   - copy the complete 12-file system32 + 11-file syswow64 payload
+      #   - DO NOT set DllOverrides / WINEDLLOVERRIDES
+      #   - DO NOT change esync
+      #
+      # TestD3D launch:
+      #   - restore the exact 2.2 packaged runtime-file baseline first
+      #   - then hand off to the unchanged 2.2 registry wrapper / real Wine
+      #
+      # This makes Test Graphics the emergency recovery path if the full
+      # runtime experiment poisons Wine startup again.
+      # ============================================================
+
+      - name: Stage 2.4 full VC runtime files-only self-recovering wrapper
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$CHECKPOINT_ROOT"
+          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+          FULL_ROOT="$ROOT/share/wine/maplestory_vc_runtime_2_4"
+          BASE_ROOT="$ROOT/share/wine/maplestory_runtime_baseline_2_4"
+
+          test -x "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -L "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+
+          rm -rf "$FULL_ROOT" "$BASE_ROOT" runtime_baseline_prefix_2_4 runtime_helper_test_2_4
+          mkdir -p \
+            "$FULL_ROOT/system32" \
+            "$FULL_ROOT/syswow64" \
+            "$BASE_ROOT/system32" \
+            "$BASE_ROOT/syswow64" \
+            runtime_baseline_prefix_2_4
+
+          cat > "$BASE_ROOT/system32-targets.txt" <<'EOF_SYS32'
+          concrt140.dll
+          msvcp140.dll
+          msvcp140_1.dll
+          msvcp140_2.dll
+          msvcp140_atomic_wait.dll
+          msvcp140_codecvt_ids.dll
+          ucrtbase.dll
+          vccorlib140.dll
+          vcomp140.dll
+          vcruntime140.dll
+          vcruntime140_1.dll
+          vcruntime140_threads.dll
+          EOF_SYS32
+
+          cat > "$BASE_ROOT/syswow64-targets.txt" <<'EOF_WOW64'
+          concrt140.dll
+          msvcp140.dll
+          msvcp140_1.dll
+          msvcp140_2.dll
+          msvcp140_atomic_wait.dll
+          msvcp140_codecvt_ids.dll
+          ucrtbase.dll
+          vccorlib140.dll
+          vcomp140.dll
+          vcruntime140.dll
+          vcruntime140_threads.dll
+          EOF_WOW64
+
+          # Stage the complete pinned Microsoft runtime payload used by the
+          # MapleStory Linux reference setup.
+          while IFS= read -r DLL; do
+            test -n "$DLL"
+            test -s "$PAYLOAD/system32/$DLL"
+            cp -a "$PAYLOAD/system32/$DLL" "$FULL_ROOT/system32/$DLL"
+          done < "$BASE_ROOT/system32-targets.txt"
+
+          while IFS= read -r DLL; do
+            test -n "$DLL"
+            test -s "$PAYLOAD/syswow64/$DLL"
+            cp -a "$PAYLOAD/syswow64/$DLL" "$FULL_ROOT/syswow64/$DLL"
+          done < "$BASE_ROOT/syswow64-targets.txt"
+
+          # Capture the exact packaged 2.2 runtime-file state. At this point
+          # prefixPack.txz contains the untouched Proton 11 runtime files plus
+          # only vcruntime140_threads.dll from step 7.
+          tar -xJf prefixPack.txz -C runtime_baseline_prefix_2_4
+          BASE_DRIVE_C="$(find runtime_baseline_prefix_2_4 -type d -name drive_c -print -quit)"
+          test -n "$BASE_DRIVE_C"
+
+          while IFS= read -r DLL; do
+            test -n "$DLL"
+            SRC="$BASE_DRIVE_C/windows/system32/$DLL"
+            if [ -f "$SRC" ]; then
+              cp -a "$SRC" "$BASE_ROOT/system32/$DLL"
+            fi
+          done < "$BASE_ROOT/system32-targets.txt"
+
+          while IFS= read -r DLL; do
+            test -n "$DLL"
+            SRC="$BASE_DRIVE_C/windows/syswow64/$DLL"
+            if [ -f "$SRC" ]; then
+              cp -a "$SRC" "$BASE_ROOT/syswow64/$DLL"
+            fi
+          done < "$BASE_ROOT/syswow64-targets.txt"
+
+          cat > "$BASE_ROOT/install-full-runtime.sh" <<'SHINSTALL'
+          #!/bin/sh
+          # Copy the complete pinned VC runtime payload into an existing prefix.
+          # POSIX shell only: do not depend on cmp, sha256sum, python, or Wine.
+
+          PREFIX="$1"
+          ROOT="$2"
+
+          if [ -z "$PREFIX" ] || [ -z "$ROOT" ]; then
+              echo "[GN-MS-2.4] ERROR: install helper missing arguments" >&2
+              exit 71
+          fi
+
+          SYS32="$PREFIX/drive_c/windows/system32"
+          WOW64="$PREFIX/drive_c/windows/syswow64"
+          mkdir -p "$SYS32" "$WOW64" || exit 72
+
+          while IFS= read -r DLL || [ -n "$DLL" ]; do
+              [ -n "$DLL" ] || continue
+              SRC="$ROOT/system32/$DLL"
+              DEST="$SYS32/$DLL"
+              [ -f "$SRC" ] || exit 73
+              rm -f "$DEST" || exit 74
+              cp "$SRC" "$DEST" || exit 75
+              chmod 644 "$DEST" 2>/dev/null || true
+              [ -s "$DEST" ] || exit 76
+          done < "$ROOT/../maplestory_runtime_baseline_2_4/system32-targets.txt"
+
+          while IFS= read -r DLL || [ -n "$DLL" ]; do
+              [ -n "$DLL" ] || continue
+              SRC="$ROOT/syswow64/$DLL"
+              DEST="$WOW64/$DLL"
+              [ -f "$SRC" ] || exit 77
+              rm -f "$DEST" || exit 78
+              cp "$SRC" "$DEST" || exit 79
+              chmod 644 "$DEST" 2>/dev/null || true
+              [ -s "$DEST" ] || exit 80
+          done < "$ROOT/../maplestory_runtime_baseline_2_4/syswow64-targets.txt"
+
+          exit 0
+          SHINSTALL
+
+          cat > "$BASE_ROOT/restore-2.2-runtime.sh" <<'SHRESTORE'
+          #!/bin/sh
+          # Restore exactly the 2.2 packaged runtime-file baseline for the
+          # VC runtime filenames touched by the 2.4 experiment.
+          # If a target did not exist in the 2.2 baseline, delete it.
+
+          PREFIX="$1"
+          ROOT="$2"
+
+          if [ -z "$PREFIX" ] || [ -z "$ROOT" ]; then
+              echo "[GN-MS-2.4] ERROR: recovery helper missing arguments" >&2
+              exit 81
+          fi
+
+          SYS32="$PREFIX/drive_c/windows/system32"
+          WOW64="$PREFIX/drive_c/windows/syswow64"
+          mkdir -p "$SYS32" "$WOW64" || exit 82
+
+          while IFS= read -r DLL || [ -n "$DLL" ]; do
+              [ -n "$DLL" ] || continue
+              SRC="$ROOT/system32/$DLL"
+              DEST="$SYS32/$DLL"
+              rm -f "$DEST" || exit 83
+              if [ -f "$SRC" ]; then
+                  cp "$SRC" "$DEST" || exit 84
+                  chmod 644 "$DEST" 2>/dev/null || true
+                  [ -s "$DEST" ] || exit 85
+              fi
+          done < "$ROOT/system32-targets.txt"
+
+          while IFS= read -r DLL || [ -n "$DLL" ]; do
+              [ -n "$DLL" ] || continue
+              SRC="$ROOT/syswow64/$DLL"
+              DEST="$WOW64/$DLL"
+              rm -f "$DEST" || exit 86
+              if [ -f "$SRC" ]; then
+                  cp "$SRC" "$DEST" || exit 87
+                  chmod 644 "$DEST" 2>/dev/null || true
+                  [ -s "$DEST" ] || exit 88
+              fi
+          done < "$ROOT/syswow64-targets.txt"
+
+          exit 0
+          SHRESTORE
+
+          chmod 755 \
+            "$BASE_ROOT/install-full-runtime.sh" \
+            "$BASE_ROOT/restore-2.2-runtime.sh"
+
+          sh -n "$BASE_ROOT/install-full-runtime.sh"
+          sh -n "$BASE_ROOT/restore-2.2-runtime.sh"
+
+          # ----------------------------------------------------------
+          # Build-time A/B simulation of BOTH helper directions.
+          # Start with the exact 2.2 packaged prefix, install the full
+          # payload, validate against the pinned reference files, then run
+          # recovery and validate every touched filename against 2.2 again.
+          # ----------------------------------------------------------
+          cp -a runtime_baseline_prefix_2_4 runtime_helper_test_2_4
+          TEST_DRIVE_C="$(find runtime_helper_test_2_4 -type d -name drive_c -print -quit)"
+          test -n "$TEST_DRIVE_C"
+          TEST_PREFIX="${TEST_DRIVE_C%/drive_c}"
+
+          "$BASE_ROOT/install-full-runtime.sh" "$TEST_PREFIX" "$FULL_ROOT"
+
+          while IFS= read -r DLL; do
+            cmp -s \
+              "$PAYLOAD/system32/$DLL" \
+              "$TEST_DRIVE_C/windows/system32/$DLL"
+          done < "$BASE_ROOT/system32-targets.txt"
+
+          while IFS= read -r DLL; do
+            cmp -s \
+              "$PAYLOAD/syswow64/$DLL" \
+              "$TEST_DRIVE_C/windows/syswow64/$DLL"
+          done < "$BASE_ROOT/syswow64-targets.txt"
+
+          "$BASE_ROOT/restore-2.2-runtime.sh" "$TEST_PREFIX" "$BASE_ROOT"
+
+          while IFS= read -r DLL; do
+            EXPECTED="$BASE_DRIVE_C/windows/system32/$DLL"
+            GOT="$TEST_DRIVE_C/windows/system32/$DLL"
+            if [ -f "$EXPECTED" ]; then
+              test -f "$GOT"
+              cmp -s "$EXPECTED" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done < "$BASE_ROOT/system32-targets.txt"
+
+          while IFS= read -r DLL; do
+            EXPECTED="$BASE_DRIVE_C/windows/syswow64/$DLL"
+            GOT="$TEST_DRIVE_C/windows/syswow64/$DLL"
+            if [ -f "$EXPECTED" ]; then
+              test -f "$GOT"
+              cmp -s "$EXPECTED" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done < "$BASE_ROOT/syswow64-targets.txt"
+
+          echo "2.4 runtime install/recovery helper simulation PASSED"
+
+          # Preserve the already-proven 2.2 registry-only wrapper as the
+          # inner launcher. The new outer wrapper only handles runtime files.
+          mv "$ROOT/bin/wine" "$ROOT/bin/wine.2.2-registry"
+          chmod 755 "$ROOT/bin/wine.2.2-registry"
+
+          cat > "$ROOT/bin/wine" <<'SHWRAP24'
+          #!/bin/sh
+          # GameNative MapleStory 216150 full VC runtime files-only A/B shim.
+          # 2.4 intentionally does NOT alter DLL load order or synchronization.
+
+          # Do not use command substitution. GameNative's LD_PRELOAD evshim
+          # writes startup messages to stdout and can corrupt captured output.
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-2.4] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          ROOT_DIR="${SCRIPT_DIR%/*}"
+          INNER_WINE="$SCRIPT_DIR/wine.2.2-registry"
+          FULL_ROOT="$ROOT_DIR/share/wine/maplestory_vc_runtime_2_4"
+          BASE_ROOT="$ROOT_DIR/share/wine/maplestory_runtime_baseline_2_4"
+          INSTALL_HELPER="$BASE_ROOT/install-full-runtime.sh"
+          RESTORE_HELPER="$BASE_ROOT/restore-2.2-runtime.sh"
+
+          if [ ! -x "$INNER_WINE" ]; then
+              echo "[GN-MS-2.4] ERROR: 2.2 registry wrapper missing: $INNER_WINE" >&2
+              exit 52
+          fi
+
+          IS_TEST_D3D=0
+          for ARG in "$@"; do
+              case "$ARG" in
+                  *TestD3D.exe*|*testd3d.exe*)
+                      IS_TEST_D3D=1
+                      ;;
+              esac
+          done
+
+          PREFIX="${WINEPREFIX:-}"
+
+          if [ -n "$PREFIX" ]; then
+              FULL_MARKER="$PREFIX/.gamenative-maplestory-full-vc-runtime-2.4"
+
+              if [ "$IS_TEST_D3D" -eq 1 ]; then
+                  if [ ! -x "$RESTORE_HELPER" ]; then
+                      echo "[GN-MS-2.4] ERROR: TestD3D recovery helper missing" >&2
+                      exit 89
+                  fi
+
+                  echo "[GN-MS-2.4] TestD3D detected; restoring exact 2.2 runtime-file baseline" >&2
+                  "$RESTORE_HELPER" "$PREFIX" "$BASE_ROOT" || exit $?
+                  rm -f "$FULL_MARKER" || exit 90
+                  echo "[GN-MS-2.4] 2.2 runtime-file baseline restored; launching TestD3D with synchronization unchanged" >&2
+              else
+                  IS_MAPLESTORY=0
+                  if [ "${SteamAppId:-}" = "216150" ] || [ "${SteamGameId:-}" = "216150" ]; then
+                      IS_MAPLESTORY=1
+                  fi
+
+                  if [ "$IS_MAPLESTORY" -eq 1 ]; then
+                      if [ ! -x "$INSTALL_HELPER" ]; then
+                          echo "[GN-MS-2.4] ERROR: full VC runtime install helper missing" >&2
+                          exit 70
+                      fi
+
+                      if [ ! -f "$FULL_MARKER" ]; then
+                          echo "[GN-MS-2.4] Installing complete VC runtime files only into $PREFIX" >&2
+                          "$INSTALL_HELPER" "$PREFIX" "$FULL_ROOT" || exit $?
+
+                          {
+                              echo "GameNative MapleStory full VC runtime files-only test 2.4"
+                              echo "Source=oldschoola/linux_maplestory pinned runtime payload"
+                              echo "System32Files=12"
+                              echo "SysWOW64Files=11"
+                              echo "DllOverrides=unchanged"
+                              echo "EnvDllLoadOrderOverrides=unchanged"
+                              echo "WineInf=unchanged"
+                              echo "Esync=unchanged"
+                              echo "Recovery=run Test Graphics under 2.4"
+                          } > "$FULL_MARKER" || exit 91
+
+                          echo "[GN-MS-2.4] Full VC runtime files-only install complete; DLL load order and esync unchanged" >&2
+                      else
+                          echo "[GN-MS-2.4] Full VC runtime files-only marker already present" >&2
+                      fi
+                  fi
+              fi
+          fi
+
+          exec "$INNER_WINE" "$@"
+          SHWRAP24
+
+          chmod 755 "$ROOT/bin/wine"
+
+          echo
+          echo "=== Validate 2.4 outer wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -f "$ROOT/bin/wine.2.2-registry"
+          test ! -L "$ROOT/bin/wine.2.2-registry"
+          test -x "$ROOT/bin/wine.2.2-registry"
+          test -L "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+
+          sh -n "$ROOT/bin/wine"
+          sh -n "$ROOT/bin/wine.2.2-registry"
+          sh -n "$BASE_ROOT/install-full-runtime.sh"
+          sh -n "$BASE_ROOT/restore-2.2-runtime.sh"
+
+          grep -Fq 'TestD3D detected; restoring exact 2.2 runtime-file baseline' "$ROOT/bin/wine"
+          grep -Fq 'Installing complete VC runtime files only' "$ROOT/bin/wine"
+          grep -Fq 'DLL load order and esync unchanged' "$ROOT/bin/wine"
+          grep -Fq 'exec "$INNER_WINE" "$@"' "$ROOT/bin/wine"
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' "$ROOT/bin/wine.2.2-registry"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine.2.2-registry"
+
+          if grep -Fq 'WINEDLLOVERRIDES=' "$ROOT/bin/wine" || \
+             grep -Fq 'export WINEDLLOVERRIDES' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEDLLOVERRIDES=' "$ROOT/bin/wine.2.2-registry" || \
+             grep -Fq 'export WINEDLLOVERRIDES' "$ROOT/bin/wine.2.2-registry"; then
+              echo "ERROR: 2.4 must not change WINEDLLOVERRIDES"
+              exit 1
+          fi
+
+          if grep -Fq 'WINEESYNC=' "$ROOT/bin/wine" || \
+             grep -Fq 'export WINEESYNC' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEESYNC=' "$ROOT/bin/wine.2.2-registry" || \
+             grep -Fq 'export WINEESYNC' "$ROOT/bin/wine.2.2-registry"; then
+              echo "ERROR: 2.4 must not change esync"
+              exit 1
+          fi
+
+          if grep -Fq 'regedit /S' "$ROOT/bin/wine" || \
+             grep -Fq 'regedit /S' "$ROOT/bin/wine.2.2-registry"; then
+              echo "ERROR: nested regedit leaked into 2.4"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$ROOT/bin/wine" || \
+             grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$BASE_ROOT/install-full-runtime.sh" || \
+             grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$BASE_ROOT/restore-2.2-runtime.sh"; then
+              echo "ERROR: Android-side 2.4 runtime wrapper/helper depends on cmp"
+              exit 1
+          fi
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" || \
+             grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: 2.4 outer wrapper contains stdout-capturing path command substitution"
+              exit 1
+          fi
+
+          echo
+          echo "2.4 full VC runtime files-only self-recovering wrapper PASSED"
+
+      # ============================================================
+      # 10. CREATE NEW 2.4 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -1275,9 +1633,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-2.3-arm64ec",
+            "versionName": "11.0-2.4-arm64ec",
             "versionCode": 2,
-            "description": "Proton 11 ARM64EC - MapleStory 2.3: retain 2.2 VC DllOverrides recovery baseline and disable esync only for MapleStory 216150 normal launch; TestD3D unchanged",
+            "description": "Proton 11 ARM64EC - MapleStory 2.4 clean full VC runtime files-only A/B on recovered 2.2 registry baseline; TestD3D restores exact 2.2 runtime-file state; no DLL overrides, no wine.inf, no regedit, esync unchanged",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -1290,13 +1648,13 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-2.3-arm64ec"' \
+            '"versionName": "11.0-2.4-arm64ec"' \
             profile.json
 
           echo "Profile validation PASSED"
 
       # ============================================================
-      # 10. BUILD THE NEW WCP
+      # 11. BUILD THE NEW WCP
       # ============================================================
 
       - name: Build WCP
@@ -1325,7 +1683,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
       # ============================================================
-      # 11. VALIDATE FINAL 2.3 WCP
+      # 12. VALIDATE FINAL 2.4 WCP
       # ============================================================
 
       - name: Validate final WCP
@@ -1343,12 +1701,19 @@ jobs:
 
           for f in \
             bin/wine \
+            bin/wine.2.2-registry \
             bin/wine.real \
             bin/wineserver \
             lib/wine/aarch64-unix/wine \
             share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
             share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
             share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh \
+            share/wine/maplestory_runtime_baseline_2_4/system32-targets.txt \
+            share/wine/maplestory_runtime_baseline_2_4/syswow64-targets.txt \
+            share/wine/maplestory_runtime_baseline_2_4/install-full-runtime.sh \
+            share/wine/maplestory_runtime_baseline_2_4/restore-2.2-runtime.sh \
+            share/wine/maplestory_vc_runtime_2_4/system32/vcruntime140_threads.dll \
+            share/wine/maplestory_vc_runtime_2_4/syswow64/vcruntime140_threads.dll \
             prefixPack.txz \
             profile.json
           do
@@ -1358,7 +1723,7 @@ jobs:
 
           tar xJOf "$WCP" profile.json > packaged-profile.json
           grep -Fq \
-            '"versionName": "11.0-2.3-arm64ec"' \
+            '"versionName": "11.0-2.4-arm64ec"' \
             packaged-profile.json
 
           rm -rf wcp_validation
@@ -1367,16 +1732,24 @@ jobs:
           tar xJf "$WCP" \
             -C wcp_validation \
             bin/wine \
+            bin/wine.2.2-registry \
             bin/wine.real \
             bin/wineserver \
             lib/wine/aarch64-unix/wine \
             share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
             share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
-            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh \
+            share/wine/maplestory_runtime_baseline_2_4/system32-targets.txt \
+            share/wine/maplestory_runtime_baseline_2_4/syswow64-targets.txt \
+            share/wine/maplestory_runtime_baseline_2_4/install-full-runtime.sh \
+            share/wine/maplestory_runtime_baseline_2_4/restore-2.2-runtime.sh
 
           test -f wcp_validation/bin/wine
           test ! -L wcp_validation/bin/wine
           test -x wcp_validation/bin/wine
+          test -f wcp_validation/bin/wine.2.2-registry
+          test ! -L wcp_validation/bin/wine.2.2-registry
+          test -x wcp_validation/bin/wine.2.2-registry
           test -L wcp_validation/bin/wine.real
           test -e wcp_validation/bin/wine.real
           test -x wcp_validation/bin/wine.real
@@ -1384,51 +1757,57 @@ jobs:
           test -x wcp_validation/bin/wineserver
           test -x wcp_validation/lib/wine/aarch64-unix/wine
           test -x wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+          test -x wcp_validation/share/wine/maplestory_runtime_baseline_2_4/install-full-runtime.sh
+          test -x wcp_validation/share/wine/maplestory_runtime_baseline_2_4/restore-2.2-runtime.sh
 
           sh -n wcp_validation/bin/wine
+          sh -n wcp_validation/bin/wine.2.2-registry
           sh -n wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+          sh -n wcp_validation/share/wine/maplestory_runtime_baseline_2_4/install-full-runtime.sh
+          sh -n wcp_validation/share/wine/maplestory_runtime_baseline_2_4/restore-2.2-runtime.sh
 
-          grep -Fq 'Restoring VC DllOverrides baseline' wcp_validation/bin/wine
-          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' wcp_validation/bin/wine
-          grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
-          grep -Fq '.gamenative-maplestory-dlloverrides-recovery-2.2' wcp_validation/bin/wine
+          grep -Fq 'TestD3D detected; restoring exact 2.2 runtime-file baseline' wcp_validation/bin/wine
+          grep -Fq 'Installing complete VC runtime files only' wcp_validation/bin/wine
+          grep -Fq 'DLL load order and esync unchanged' wcp_validation/bin/wine
+          grep -Fq 'exec "$INNER_WINE" "$@"' wcp_validation/bin/wine
+          grep -Fq 'Restoring VC DllOverrides baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine.2.2-registry
 
-          grep -Fq 'TestD3D.exe' wcp_validation/bin/wine
-          grep -Fq 'WINEESYNC=0' wcp_validation/bin/wine
-          grep -Fq 'MapleStory launch detected; WINEESYNC=0' wcp_validation/bin/wine
-          grep -Fq 'TestD3D detected; preserving original esync state' wcp_validation/bin/wine
-
-          python3 - wcp_validation/bin/wine <<'PYORDER'
-          import sys
-          from pathlib import Path
-          text = Path(sys.argv[1]).read_text(encoding='utf-8')
-          guard = text.index('IS_TEST_D3D=0')
-          set_esync = text.index('WINEESYNC=0')
-          exec_real = text.index('exec "$REAL_WINE" "$@"')
-          if not (guard < set_esync < exec_real):
-              raise SystemExit('ERROR: packaged TestD3D guard / WINEESYNC / exec ordering is wrong')
-          print('Packaged TestD3D guard precedes MapleStory-only WINEESYNC override')
-          PYORDER
-
-          if grep -Fq 'WINEDLLOVERRIDES' wcp_validation/bin/wine; then
-              echo "ERROR: packaged wrapper contains WINEDLLOVERRIDES"
+          if grep -Fq 'WINEDLLOVERRIDES=' wcp_validation/bin/wine || \
+             grep -Fq 'export WINEDLLOVERRIDES' wcp_validation/bin/wine || \
+             grep -Fq 'WINEDLLOVERRIDES=' wcp_validation/bin/wine.2.2-registry || \
+             grep -Fq 'export WINEDLLOVERRIDES' wcp_validation/bin/wine.2.2-registry; then
+              echo "ERROR: packaged 2.4 wrapper changes WINEDLLOVERRIDES"
               exit 1
           fi
 
-          if grep -Fq 'regedit /S' wcp_validation/bin/wine; then
-              echo "ERROR: packaged wrapper contains nested regedit"
+          if grep -Fq 'WINEESYNC=' wcp_validation/bin/wine || \
+             grep -Fq 'export WINEESYNC' wcp_validation/bin/wine || \
+             grep -Fq 'WINEESYNC=' wcp_validation/bin/wine.2.2-registry || \
+             grep -Fq 'export WINEESYNC' wcp_validation/bin/wine.2.2-registry; then
+              echo "ERROR: packaged 2.4 wrapper changes esync"
               exit 1
           fi
 
-          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/bin/wine; then
-              echo "ERROR: packaged guest wrapper depends on cmp"
+          if grep -Fq 'regedit /S' wcp_validation/bin/wine || \
+             grep -Fq 'regedit /S' wcp_validation/bin/wine.2.2-registry; then
+              echo "ERROR: packaged 2.4 wrapper contains nested regedit"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/bin/wine || \
+             grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/share/wine/maplestory_runtime_baseline_2_4/install-full-runtime.sh || \
+             grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/share/wine/maplestory_runtime_baseline_2_4/restore-2.2-runtime.sh; then
+              echo "ERROR: packaged Android-side 2.4 runtime wrapper/helper depends on cmp"
               exit 1
           fi
 
           echo "=== Packaged upstream DllOverrides baseline ==="
           cat wcp_validation/share/wine/maplestory_registry_recovery_2_2/baseline-status.txt
 
-          # Confirm 2.3 did not mutate wine.inf for live-prefix recovery.
+          # Confirm neither the 2.2 registry recovery nor the 2.4 runtime A/B
+          # test uses wine.inf as a live-prefix deployment mechanism.
           grep -Fxq 'share/wine/wine.inf' wcp-files.txt
           tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
 
@@ -1439,13 +1818,13 @@ jobs:
 
           if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
              grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
-              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 2.3"
+              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 2.4"
               exit 1
           fi
 
-          # Packaged prefix remains the controlled 1.6-compatible state for
-          # genuinely new prefixes: MapleStory registry fixes plus only
-          # vcruntime140_threads.dll added to the untouched VC file baseline.
+          # The packaged prefix itself MUST remain the known-good 2.2 state:
+          # MapleStory registry fixes + exact upstream VC runtime baseline +
+          # only vcruntime140_threads.dll from the pinned reference payload.
           tar xJOf "$WCP" prefixPack.txz > packaged-prefix.txz
           rm -rf packaged_prefix packaged_base_prefix
           mkdir -p packaged_prefix packaged_base_prefix
@@ -1471,10 +1850,10 @@ jobs:
           grep -Fq '"CSMT"="disabled"' "$USER_REG"
           grep -Fq '"URL Protocol"=""' "$SYSTEM_REG"
 
-          SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll'
-          WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll'
+          SYS32_BASE_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll'
+          WOW64_BASE_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll'
 
-          for DLL in $SYS32_LIST; do
+          for DLL in $SYS32_BASE_LIST; do
             BASE="$BASE_DRIVE_C/windows/system32/$DLL"
             GOT="$PREFIX_DRIVE_C/windows/system32/$DLL"
             if [ -f "$BASE" ]; then
@@ -1485,7 +1864,7 @@ jobs:
             fi
           done
 
-          for DLL in $WOW64_LIST; do
+          for DLL in $WOW64_BASE_LIST; do
             BASE="$BASE_DRIVE_C/windows/syswow64/$DLL"
             GOT="$PREFIX_DRIVE_C/windows/syswow64/$DLL"
             if [ -f "$BASE" ]; then
@@ -1504,22 +1883,39 @@ jobs:
             "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/vcruntime140_threads.dll" \
             "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
 
-          echo "Packaged prefix validation PASSED"
+          # Validate the staged full payload contains every expected file and
+          # is byte-identical to the pinned reference source.
+          tar xJf "$WCP" -C wcp_validation \
+            share/wine/maplestory_vc_runtime_2_4
+
+          while IFS= read -r DLL; do
+            cmp -s \
+              "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/system32/$DLL" \
+              "wcp_validation/share/wine/maplestory_vc_runtime_2_4/system32/$DLL"
+          done < wcp_validation/share/wine/maplestory_runtime_baseline_2_4/system32-targets.txt
+
+          while IFS= read -r DLL; do
+            cmp -s \
+              "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/$DLL" \
+              "wcp_validation/share/wine/maplestory_vc_runtime_2_4/syswow64/$DLL"
+          done < wcp_validation/share/wine/maplestory_runtime_baseline_2_4/syswow64-targets.txt
+
+          echo "Packaged prefix and full-runtime staging validation PASSED"
 
           sha256sum "$WCP"
 
           echo "=========================================="
-          echo "2.3 WCP validation PASSED"
+          echo "2.4 WCP validation PASSED"
           echo "=========================================="
 
       # ============================================================
-      # 12. UPLOAD 2.3 WCP
+      # 13. UPLOAD 2.4 WCP
       # ============================================================
 
-      - name: Upload MapleStory 2.3 esync-off WCP
+      - name: Upload MapleStory 2.4 full VC runtime files-only self-recovering WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-2.3-arm64ec
-          path: proton-11.0-2.3-arm64ec.wcp
+          name: proton-11.0-2.4-arm64ec
+          path: proton-11.0-2.4-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
