@@ -1,4 +1,4 @@
-name: Build MapleStory ARM64EC Finalized Proton 11 Base 3.0
+name: Build MapleStory ARM64EC GE-Proton 11.0-3 Game-Fixes 3.1
 
 on:
   workflow_dispatch:
@@ -11,13 +11,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      # Finalized Valve Proton 11.0-2 / Wine 11.0 base, rebased onto
-      # GameNative's Android/bionic ARM64EC build stack.
+      # Device-verified GE-Proton11-3 standalone game-fixes tier on
+      # Valve Wine 11.0, compiled for Android/bionic ARM64EC.
       SOURCE_REPOSITORY: "The412Banner/proton-wine"
-      SOURCE_COMMIT: "8bff4069546ee4a41154bdb7157b9adad4f9dee3"
-
-      # The two MapleStory-specific source fixes we have already tested.
-      GE_MAPLE_PATCH_REF: "3453c5b"
+      SOURCE_COMMIT: "96b37be54dab6b0bf69cd4fa23669dd186fdc183"
 
       # Exact GameNative Proton 11 ARM64EC prefix-pack commit.
       PREFIX_COMMIT: "450f670aa65243b2e7b5364d9577eb23f17b6855"
@@ -25,8 +22,8 @@ jobs:
       # Same pinned Microsoft runtime payload source used by 2.2.
       RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
 
-      CUSTOM_VERSION: "11.0-3.0-arm64ec"
-      WCP_NAME: "proton-11.0-3.0-arm64ec.wcp"
+      CUSTOM_VERSION: "11.0-3.1-arm64ec"
+      WCP_NAME: "proton-11.0-3.1-arm64ec.wcp"
 
     steps:
       # ============================================================
@@ -46,15 +43,20 @@ jobs:
           df -h
 
       # ============================================================
-      # 2. CHECK OUT THE FINALIZED PROTON 11 ARM64EC SOURCE
+      # 2. CHECK OUT THE DEVICE-VERIFIED GE-PROTON 11.0-3
+      #    GAME-FIXES ARM64EC SOURCE
       #
-      # 8bff406 is the finalized Proton 11.0-2/Wine 11.0 tree with
-      # Android/bionic ARM64EC build stack required for GameNative-class runtimes.
-      # We add only the two MapleStory-specific source patches ourselves. This is the ONE major
-      # variable versus our old f7c0166 May snapshot.
+      # This exact July 25 source already contains the GE standalone
+      # game-fixes tier, INCLUDING both MapleStory patches we previously
+      # carried ourselves. Do NOT apply the MapleStory patches again.
+      #
+      # Important: we compile from source and then package with our
+      # known-good 2.2 prefix/runtime/registry state. We intentionally
+      # do not install/repackage the maintainer's published WCP because
+      # that release explicitly requires a fresh arm64ec container.
       # ============================================================
 
-      - name: Checkout finalized Proton 11 ARM64EC source
+      - name: Checkout GE-Proton 11.0-3 ARM64EC game-fixes source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
@@ -63,7 +65,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Validate pinned source baseline
+      - name: Validate pinned GE-Proton 11.0-3 game-fixes source
         shell: bash
         run: |
           set -euxo pipefail
@@ -78,26 +80,30 @@ jobs:
           test -f dlls/win32u/sysparams.c
           test -f dlls/kernelbase/string.c
 
-          # Confirm this pinned base does NOT already contain our two
-          # MapleStory source fixes, so the 3.0 delta is explicit.
-          grep -Fq 'WINE_SPI_FIXME(SPI_SETFILTERKEYS);' dlls/win32u/sysparams.c
-          grep -Fq 'WINE_SPI_FIXME(SPI_SETSTICKYKEYS);' dlls/win32u/sysparams.c
+          # At checkout the GE game-fix source patches are staged under
+          # android/ge-patches/game-fixes. The Android build script applies
+          # them AFTER its bionic patch layer during --configure.
+          test -x build-scripts/apply-ge-patches.sh
+          GE_DIR="android/ge-patches/game-fixes"
+          test -d "$GE_DIR"
 
-          if grep -Fq 'WINE_SPI_WARN(SPI_SETFILTERKEYS);' dlls/win32u/sysparams.c; then
-            echo "ERROR: SPI MapleStory fix is already present in source baseline"
-            exit 1
-          fi
+          for PATCH in \
+            0001-win32u-Avoid-zero-WM_ACTIVATEAPP-lparam-on-first-for.patch \
+            assettocorsa-hud.patch \
+            battlenet-launcher-in-process-gpu.patch \
+            dai_xinput.patch \
+            eac_60101_timeout.patch \
+            maplestory-kernelbase-charprev-null.patch \
+            maplestory-spi-stickykeys-filterkeys.patch \
+            pso2_hack.patch \
+            silence-starcitizen-unsupported-os.patch \
+            vgsoh.patch
+          do
+            test -s "$GE_DIR/$PATCH"
+          done
 
-          python3 - <<'PYBASE'
-          from pathlib import Path
-          text = Path('dlls/kernelbase/string.c').read_text()
-          for fn in ('CharPrevA', 'CharPrevExA'):
-              start = text.index(f'WINAPI {fn}(')
-              body = text[start:start + 500]
-              if 'if (!start) return NULL;' in body:
-                  raise SystemExit(f'ERROR: {fn} NULL guard already present in source baseline')
-          print('Pinned finalized source baseline validation PASSED')
-          PYBASE
+          test "$(find "$GE_DIR" -maxdepth 1 -type f -name '*.patch' | wc -l)" -eq 10
+          grep -Fq './build-scripts/apply-ge-patches.sh' build-scripts/build-step-arm64ec.sh
 
           echo
           echo "=== ARM64EC build script ==="
@@ -105,59 +111,13 @@ jobs:
           grep -Fq 'export WIN_ARCH="arm64ec,aarch64,i386"' build-scripts/build-step-arm64ec.sh
           grep -Fq 'export TARGET=aarch64-linux-android28' build-scripts/build-step-arm64ec.sh
 
-      # ============================================================
-      # 3. APPLY ONLY THE TWO PROVEN MAPLESTORY SOURCE PATCHES
-      # ============================================================
-
-      - name: Download and apply MapleStory source patches
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p maplestory_source_patches
-
-          wget -O maplestory_source_patches/maplestory-spi-stickykeys-filterkeys.patch \
-            "https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/${GE_MAPLE_PATCH_REF}/patches/game-patches/maplestory-spi-stickykeys-filterkeys.patch"
-
-          wget -O maplestory_source_patches/maplestory-kernelbase-charprev-null.patch \
-            "https://raw.githubusercontent.com/GloriousEggroll/proton-ge-custom/${GE_MAPLE_PATCH_REF}/patches/game-patches/maplestory-kernelbase-charprev-null.patch"
-
-          test -s maplestory_source_patches/maplestory-spi-stickykeys-filterkeys.patch
-          test -s maplestory_source_patches/maplestory-kernelbase-charprev-null.patch
-
-          echo "=== MapleStory patch hashes ==="
-          sha256sum maplestory_source_patches/*.patch
-
-          git apply --check maplestory_source_patches/maplestory-spi-stickykeys-filterkeys.patch
-          git apply maplestory_source_patches/maplestory-spi-stickykeys-filterkeys.patch
-
-          git apply --check maplestory_source_patches/maplestory-kernelbase-charprev-null.patch
-          git apply maplestory_source_patches/maplestory-kernelbase-charprev-null.patch
-
-          grep -Fq 'WINE_SPI_WARN(SPI_SETFILTERKEYS);' dlls/win32u/sysparams.c
-          grep -Fq 'WINE_SPI_WARN(SPI_SETSTICKYKEYS);' dlls/win32u/sysparams.c
-
-          python3 - <<'PYPATCH'
-          from pathlib import Path
-          text = Path('dlls/kernelbase/string.c').read_text()
-          for fn in ('CharPrevA', 'CharPrevExA'):
-              start = text.index(f'WINAPI {fn}(')
-              body = text[start:start + 500]
-              if 'if (!start) return NULL;' not in body:
-                  raise SystemExit(f'ERROR: {fn} NULL guard missing after patch')
-          print('Both MapleStory source patches validated')
-          PYPATCH
-
-          echo
-          echo "=== Controlled source delta before Android build patches ==="
-          git diff --stat
-          git diff -- dlls/win32u/sysparams.c dlls/kernelbase/string.c
+          echo "Pinned GE-Proton 11.0-3 game-fixes source validation PASSED"
 
       # ============================================================
-      # 4. SET UP THE EXACT SDK28/BIONIC BUILD ENVIRONMENT
+      # 3. SET UP THE SAME SDK28/BIONIC BUILD ENVIRONMENT
       #
-      # Keep SDK28/4K-page build behavior to match the known-working
-      # GameNative ARM64EC environment. We are NOT testing SDK35 here.
+      # Keep SDK28/4K-page behavior to match our known-working GameNative
+      # setup. No SDK/page-size variable is being changed in this A/B.
       # ============================================================
 
       - name: Set up build dependencies
@@ -250,7 +210,7 @@ jobs:
           rm -f llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
 
       # ============================================================
-      # 5. BUILD WINE TOOLS + FINALIZED ARM64EC PROTON
+      # 4. BUILD WINE TOOLS + GE-PROTON 11.0-3 GAME-FIXES ARM64EC
       # ============================================================
 
       - name: Autogen
@@ -259,12 +219,12 @@ jobs:
           set -euxo pipefail
           bash build-scripts/build-step0-autogen.sh
 
-      - name: Cache finalized Proton 11 wine-tools
+      - name: Cache GE-Proton 11.0-3 wine-tools
         id: cache-wine-tools
         uses: actions/cache@v4
         with:
           path: wine-tools
-          key: wine-tools-p11-final-8bff406-${{ hashFiles('configure.ac', 'configure') }}
+          key: wine-tools-ge11-3-96b37be-${{ hashFiles('configure.ac', 'configure') }}
 
       - name: Build wine-tools
         if: steps.cache-wine-tools.outputs.cache-hit != 'true'
@@ -279,28 +239,33 @@ jobs:
           set -euxo pipefail
           bash build-scripts/build-step-arm64ec.sh --build-sysvshm
 
-      - name: Configure finalized ARM64EC Proton
+      - name: Configure GE-Proton 11.0-3 ARM64EC
         shell: bash
         run: |
           set -euxo pipefail
 
           bash build-scripts/build-step-arm64ec.sh --configure
 
-          # The GameNative Android patch layer is applied by the build script
-          # during --configure. Confirm our two MapleStory fixes survived it.
+          # Android/bionic build patches are applied during --configure.
+          # Confirm the GE MapleStory fixes remain present afterward.
           grep -Fq 'WINE_SPI_WARN(SPI_SETFILTERKEYS);' dlls/win32u/sysparams.c
           grep -Fq 'WINE_SPI_WARN(SPI_SETSTICKYKEYS);' dlls/win32u/sysparams.c
           test "$(grep -Fc 'if (!start) return NULL;' dlls/kernelbase/string.c)" -ge 2
 
-          echo "MapleStory fixes survived GameNative Android patch application"
+          # Spot-check additional GE game-fix code markers after application.
+          grep -R -Fq 'WINE_NO_OPEN_FILE_SEARCH' dlls
+          grep -R -Fq 'EAC_LAUNCHERDIR' dlls
+          grep -R -Fq 'Star Citizen' dlls/user32
 
-      - name: Build finalized ARM64EC Proton
+          echo "GE-Proton11-3 game-fixes survived Android/bionic configure patching"
+
+      - name: Build GE-Proton 11.0-3 ARM64EC
         shell: bash
         run: |
           set -euxo pipefail
           bash build-scripts/build-step-arm64ec.sh --build
 
-      - name: Install finalized ARM64EC Proton
+      - name: Install GE-Proton 11.0-3 ARM64EC
         shell: bash
         run: |
           set -euxo pipefail
@@ -310,7 +275,7 @@ jobs:
       # 6. VALIDATE THE NEW COMPILED BASE
       # ============================================================
 
-      - name: Validate compiled finalized Proton runtime
+      - name: Validate compiled GE-Proton 11.0-3 runtime
         shell: bash
         run: |
           set -euxo pipefail
@@ -333,16 +298,16 @@ jobs:
           chmod 755 "$ROOT/bin/wineserver"
           find "$ROOT/bin" -maxdepth 1 -type f -name 'wine*' -exec chmod 755 {} \;
 
-          echo "=== Compiled finalized Proton root ==="
+          echo "=== Compiled GE-Proton 11.0-3 root ==="
           du -sh "$ROOT"
           ls -lah "$ROOT/bin" | sed -n '1,100p'
 
-          echo "Compiled finalized Proton runtime validation PASSED"
+          echo "Compiled GE-Proton 11.0-3 runtime validation PASSED"
 
       # ============================================================
       # 7. SAVE A NEW CHECKPOINT BEFORE PREFIX/PACKAGING CHANGES
       #
-      # Future 3.x tests can reuse this workflow run ID and avoid another
+      # Future GE-11.3 tests can reuse this workflow run ID and avoid another
       # ~30 minute Wine rebuild, exactly like the old checkpoint workflow.
       # ============================================================
 
@@ -373,7 +338,7 @@ jobs:
       - name: Upload compiled ARM64EC checkpoint
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-proton-arm64ec-checkpoint
+          name: compiled-proton-arm64ec-ge11.0-3-gamefixes-checkpoint
           path: compiled-proton-checkpoint.tar
           retention-days: 7
           compression-level: 0
@@ -1474,7 +1439,7 @@ jobs:
           echo "2.2 live-prefix registry-only recovery wrapper PASSED"
 
       # ============================================================
-      # 9. CREATE NEW 3.0 GAMENATIVE PROFILE
+      # 9. CREATE NEW 3.1 GAMENATIVE PROFILE
       # ============================================================
 
       - name: Generate GameNative Proton profile
@@ -1485,9 +1450,9 @@ jobs:
           cat > profile.json <<'EOF'
           {
             "type": "Proton",
-            "versionName": "11.0-3.0-arm64ec",
+            "versionName": "11.0-3.1-arm64ec",
             "versionCode": 2,
-            "description": "MapleStory 3.0 - finalized Proton 11.0-2 ARM64EC base 8bff406 + CharPrev/SPI source fixes + known-good 2.2 prefix/runtime/registry state",
+            "description": "MapleStory 3.1 - GE-Proton11-3 ARM64EC game-fixes tier 96b37be (includes MapleStory CharPrev/SPI) + known-good 2.2 prefix/runtime/registry state",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -1500,10 +1465,10 @@ jobs:
           cat profile.json
 
           grep -Fq \
-            '"versionName": "11.0-3.0-arm64ec"' \
+            '"versionName": "11.0-3.1-arm64ec"' \
             profile.json
 
-          echo "3.0 profile validation PASSED"
+          echo "3.1 profile validation PASSED"
 
       # ============================================================
       # 10. BUILD THE NEW WCP
@@ -1535,7 +1500,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
 
       # ============================================================
-      # 11. VALIDATE FINAL 3.0 WCP
+      # 11. VALIDATE FINAL 3.1 WCP
       # ============================================================
 
       - name: Validate final WCP
@@ -1568,7 +1533,7 @@ jobs:
 
           tar xJOf "$WCP" profile.json > packaged-profile.json
           grep -Fq \
-            '"versionName": "11.0-3.0-arm64ec"' \
+            '"versionName": "11.0-3.1-arm64ec"' \
             packaged-profile.json
 
           rm -rf wcp_validation
@@ -1603,7 +1568,7 @@ jobs:
           grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine
 
           if grep -Fq 'TestD3D.exe' wcp_validation/bin/wine; then
-              echo "ERROR: packaged 3.0 carry-forward registry wrapper bypasses TestD3D"
+              echo "ERROR: packaged 3.1 carry-forward registry wrapper bypasses TestD3D"
               exit 1
           fi
 
@@ -1636,7 +1601,7 @@ jobs:
 
           if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
              grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
-              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 3.0"
+              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 3.1"
               exit 1
           fi
 
@@ -1706,17 +1671,17 @@ jobs:
           sha256sum "$WCP"
 
           echo "=========================================="
-          echo "3.0 WCP validation PASSED"
+          echo "3.1 WCP validation PASSED"
           echo "=========================================="
 
       # ============================================================
-      # 12. UPLOAD 3.0 WCP
+      # 12. UPLOAD 3.1 WCP
       # ============================================================
 
-      - name: Upload MapleStory 3.0 finalized Proton 11 WCP
+      - name: Upload MapleStory 3.1 GE-Proton 11.0-3 WCP
         uses: actions/upload-artifact@v4
         with:
-          name: proton-11.0-3.0-arm64ec
-          path: proton-11.0-3.0-arm64ec.wcp
+          name: proton-11.0-3.1-arm64ec
+          path: proton-11.0-3.1-arm64ec.wcp
           if-no-files-found: error
           retention-days: 30
