@@ -1437,8 +1437,8 @@ jobs:
               fi
 
               # Intentionally restore on EVERY top-level Wine invocation.
-              # There is no TestD3D/SteamAppId/marker gate, so a later failed
-              # experiment cannot leave a stale marker that suppresses recovery.
+              # There is no test/app-ID/marker gate, so a later failed experiment
+              # cannot leave a stale marker that suppresses recovery.
               echo "[GN-MS-2.5] Restoring exact known-good 2.2 runtime-file baseline in $PREFIX" >&2
               "$RESTORE_HELPER" "$PREFIX" "$BASE_ROOT" || exit $?
 
