@@ -1,0 +1,1677 @@
+name: Package MapleStory ARM64EC 3.8 Clean NGS Log Collector
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful 3.1 workflow run ID containing compiled-proton-arm64ec-ge11.0-3-gamefixes-checkpoint"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+
+    env:
+      # Reuse the already-compiled GE-Proton11-3 ARM64EC game-fixes runtime.
+      # This workflow does NOT rebuild Wine.
+      CHECKPOINT_ARTIFACT: "compiled-proton-arm64ec-ge11.0-3-gamefixes-checkpoint"
+
+      # Exact GameNative Proton 11 ARM64EC prefix-pack commit used by 3.1/2.2.
+      PREFIX_COMMIT: "450f670aa65243b2e7b5364d9577eb23f17b6855"
+
+      # Same pinned Microsoft runtime payload source used by 2.2/3.1.
+      RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
+
+      CUSTOM_VERSION: "11.0-3.8-arm64ec"
+      WCP_NAME: "proton-11.0-3.8-arm64ec.wcp"
+
+    steps:
+      # ============================================================
+      # 1. RESTORE THE SUCCESSFUL 3.1 COMPILED CHECKPOINT
+      # ============================================================
+
+      - name: Download 3.1 compiled ARM64EC checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CHECKPOINT_ARTIFACT }}
+          path: checkpoint_download
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Restore and validate 3.1 compiled runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CHECKPOINT="$(find checkpoint_download -type f -name 'compiled-proton-checkpoint.tar' -print -quit)"
+          test -n "$CHECKPOINT"
+          test -s "$CHECKPOINT"
+
+          ROOT="$HOME/compiled-files-aarch64"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT"
+
+          tar -C "$ROOT" -xf "$CHECKPOINT"
+
+          test -d "$ROOT/bin"
+          test -d "$ROOT/lib"
+          test -d "$ROOT/share"
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
+          test -e "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wineserver"
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
+
+          chmod 755 "$ROOT/lib/wine/aarch64-unix/wine"
+          chmod 755 "$ROOT/bin/wineserver"
+          find "$ROOT/bin" -maxdepth 1 -type f -name 'wine*' -exec chmod 755 {} \;
+
+          echo "=== Reused 3.1 GE-Proton11-3 compiled runtime ==="
+          du -sh "$ROOT"
+          ls -lah "$ROOT/bin" | sed -n '1,100p'
+          sha256sum "$CHECKPOINT"
+
+          echo "3.1 compiled checkpoint restore PASSED"
+
+      # ============================================================
+      # From here onward, reproduce the known-good 3.1 packaging state,
+      # then add only the observation-only 3.8 MapleStory hot-exit watcher.
+      # ============================================================
+
+      - name: Checkout pinned MapleStory VC runtime payload
+        uses: actions/checkout@v4
+        with:
+          repository: oldschoola/linux_maplestory
+          ref: ${{ env.RUNTIME_COMMIT }}
+          path: maplestory_reference
+          sparse-checkout: |
+            files/vc_runtime
+            patches/13-apply-runtime-file-patches.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate pinned VC runtime payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+
+          SYS32=(
+            concrt140.dll
+            msvcp140.dll
+            msvcp140_1.dll
+            msvcp140_2.dll
+            msvcp140_atomic_wait.dll
+            msvcp140_codecvt_ids.dll
+            ucrtbase.dll
+            vccorlib140.dll
+            vcomp140.dll
+            vcruntime140.dll
+            vcruntime140_1.dll
+            vcruntime140_threads.dll
+          )
+
+          WOW64=(
+            concrt140.dll
+            msvcp140.dll
+            msvcp140_1.dll
+            msvcp140_2.dll
+            msvcp140_atomic_wait.dll
+            msvcp140_codecvt_ids.dll
+            ucrtbase.dll
+            vccorlib140.dll
+            vcomp140.dll
+            vcruntime140.dll
+            vcruntime140_threads.dll
+          )
+
+          for dll in "${SYS32[@]}"; do
+            test -s "$ROOT/system32/$dll"
+          done
+
+          for dll in "${WOW64[@]}"; do
+            test -s "$ROOT/syswow64/$dll"
+          done
+
+          echo "=== Runtime payload commit ==="
+          git -C "$GITHUB_WORKSPACE/maplestory_reference" rev-parse HEAD
+          test "$(git -C "$GITHUB_WORKSPACE/maplestory_reference" rev-parse HEAD)" = "$RUNTIME_COMMIT"
+
+          echo
+          echo "=== system32 payload ==="
+          for dll in "${SYS32[@]}"; do
+            file "$ROOT/system32/$dll"
+            sha256sum "$ROOT/system32/$dll"
+          done
+
+          echo
+          echo "=== syswow64 payload ==="
+          for dll in "${WOW64[@]}"; do
+            file "$ROOT/syswow64/$dll"
+            sha256sum "$ROOT/syswow64/$dll"
+          done
+
+          echo
+          echo "Pinned VC runtime payload validation PASSED"
+
+      # ============================================================
+      # 5. DOWNLOAD THE CORRECT PROTON 11 ARM64EC PREFIX
+      #
+      # IMPORTANT:
+      # Use prefixPack-arm64ec-11.txz.
+      # Do NOT use the generic prefixPack-arm64ec.txz.
+      # ============================================================
+
+      - name: Download GameNative Proton 11 ARM64EC prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          wget \
+            https://raw.githubusercontent.com/GameNative/bionic-prefix-files/450f670aa65243b2e7b5364d9577eb23f17b6855/prefixPack-arm64ec-11.txz \
+            -O prefixPack-base.txz
+
+          test -s prefixPack-base.txz
+
+          echo
+          echo "=== Base prefix pack ==="
+
+          ls -lh prefixPack-base.txz
+          file prefixPack-base.txz
+          sha256sum prefixPack-base.txz
+
+      # ============================================================
+      # 6. APPLY THE MAPLESTORY REGISTRY FIXES
+      #
+      # Carry forward the known-good registry layer unchanged.
+      # The only runtime payload remains vcruntime140_threads.dll.
+      # The Wine rebuild already occurred above; no additional source changes here.
+      # ============================================================
+
+      - name: Patch MapleStory registry settings into prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf prefix_work
+          mkdir -p prefix_work
+
+          tar -xJf prefixPack-base.txz \
+            -C prefix_work
+
+          echo "=== Prefix structure ==="
+
+          find prefix_work \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            > prefix-files-before.txt
+
+          sed -n '1,150p' prefix-files-before.txt
+
+          USER_REG="$(find prefix_work -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find prefix_work -type f -name system.reg -print -quit)"
+          USERDEF_REG="$(find prefix_work -type f -name userdef.reg -print -quit || true)"
+
+          if [ -z "$USER_REG" ]; then
+            echo "ERROR: user.reg not found in prefix."
+            exit 1
+          fi
+
+          if [ -z "$SYSTEM_REG" ]; then
+            echo "ERROR: system.reg not found in prefix."
+            exit 1
+          fi
+
+          echo
+          echo "=== Registry hives ==="
+
+          echo "user.reg:    $USER_REG"
+          echo "system.reg:  $SYSTEM_REG"
+          echo "userdef.reg: ${USERDEF_REG:-not present}"
+
+          python3 - \
+            "$USER_REG" \
+            "$SYSTEM_REG" \
+            "${USERDEF_REG:-}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          system_reg = Path(sys.argv[2])
+          userdef_arg = sys.argv[3]
+          userdef_reg = Path(userdef_arg) if userdef_arg else None
+
+
+          def string_value(value):
+              value = value.replace("\\", "\\\\")
+              value = value.replace('"', '\\"')
+              return f'"{value}"'
+
+
+          def value_name(name):
+              if name is None:
+                  return "@"
+
+              escaped = name.replace("\\", "\\\\")
+              escaped = escaped.replace('"', '\\"')
+
+              return f'"{escaped}"'
+
+
+          def render(name, kind, value):
+              prefix = value_name(name) + "="
+
+              if kind == "str":
+                  return prefix + string_value(value)
+
+              if kind == "dword":
+                  return prefix + f"dword:{value:08x}"
+
+              raise ValueError(f"Unknown value type: {kind}")
+
+
+          # Wine's internal registry-file format is similar to REGEDIT.
+          # These paths are relative to HKCU inside user.reg.
+
+          USER_PATCHES = {
+              r"Software\\Wine\\X11 Driver": {
+                  "UseTakeFocus": ("str", "N"),
+                  "Grab": ("str", "N"),
+                  "GrabFullscreen": ("str", "N"),
+                  "UseLinuxInputEvents": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\DirectInput": {
+                  "UseLinuxInputEvents": ("str", "Y"),
+                  "KeyboardUseNonExclusive": ("str", "Y"),
+                  "MouseUseNonExclusive": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\MapleStory.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\nxsteam.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\SteamConnectorHelper.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Nexon Launcher": {
+                  "Install Directory": ("str", r"C:\Nexon\Launcher"),
+                  "Region": ("str", "1"),
+                  "User Data": (
+                      "str",
+                      '{"setup-id":"372e7640-20f4-419c-ada0-4ad0d76c33d9","time":1748271149}',
+                  ),
+              },
+
+              r"Software\\Wine\\Direct3D": {
+                  "cb_access_map_w": ("dword", 1),
+                  "CSMT": ("str", "disabled"),
+              },
+          }
+
+
+          # These paths are relative to HKLM inside system.reg.
+
+          SYSTEM_PATCHES = {
+              r"Software\\Classes\\Applications\\nexon_launcher.exe\\shell\\open": {
+                  "FriendlyAppName": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl": {
+                  None: ("str", "URL:nxl protocol"),
+                  "URL Protocol": ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\DefaultIcon": {
+                  None: ("str", r"C:\Nexon\Launcher\nexon_launcher.exe"),
+              },
+
+              r"Software\\Classes\\nxl\\shell": {
+                  None: ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open": {
+                  None: ("str", ""),
+                  "Friendly App Name": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open\\command": {
+                  None: (
+                      "str",
+                      r'"C:\Nexon\Launcher\nexon_launcher.exe" "%1"',
+                  ),
+              },
+
+              r"Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nexon Nexon Launcher": {
+                  "DisplayIcon": (
+                      "str",
+                      r'"C:\Nexon\Launcher\logo.ico"',
+                  ),
+                  "DisplayName": (
+                      "str",
+                      "Nexon Launcher",
+                  ),
+                  "DisplayVersion": (
+                      "str",
+                      "2.3.0",
+                  ),
+                  "EstimatedSize": (
+                      "dword",
+                      0x2B48,
+                  ),
+                  "HelpLink": (
+                      "str",
+                      r'"http://www.nexon.net/legal/terms-of-use/"',
+                  ),
+                  "InstallLocation": (
+                      "str",
+                      r'"C:\Nexon\Launcher"',
+                  ),
+                  "NoModify": (
+                      "dword",
+                      1,
+                  ),
+                  "NoRepair": (
+                      "dword",
+                      1,
+                  ),
+                  "Publisher": (
+                      "str",
+                      "Nexon",
+                  ),
+                  "QuietUninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe" /S',
+                  ),
+                  "UninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe"',
+                  ),
+                  "URLInfoAbout": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "URLUpdateInfo": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "VersionMajor": (
+                      "dword",
+                      2,
+                  ),
+                  "VersionMinor": (
+                      "dword",
+                      3,
+                  ),
+              },
+          }
+
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+
+          def find_section(lines, section):
+              for index, line in enumerate(lines):
+                  match = section_re.match(line)
+
+                  if match and match.group(1) == section:
+                      start = index
+
+                      end = len(lines)
+
+                      for next_index in range(index + 1, len(lines)):
+                          if section_re.match(lines[next_index]):
+                              end = next_index
+                              break
+
+                      return start, end
+
+              return None
+
+
+          def patch_hive(path, patches):
+              print(f"Patching {path}")
+
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              lines = text.splitlines()
+
+              for section, values in patches.items():
+
+                  current = find_section(lines, section)
+
+                  if current is None:
+                      if lines and lines[-1] != "":
+                          lines.append("")
+
+                      # Modification time is optional in Wine registry v2.
+                      lines.append(f"[{section}]")
+
+                      for name, (kind, value) in values.items():
+                          lines.append(
+                              render(
+                                  name,
+                                  kind,
+                                  value,
+                              )
+                          )
+
+                      continue
+
+                  for name, (kind, value) in values.items():
+
+                      desired = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      token = value_name(name) + "="
+
+                      start, end = find_section(
+                          lines,
+                          section,
+                      )
+
+                      replaced = False
+
+                      for line_index in range(
+                          start + 1,
+                          end,
+                      ):
+                          if lines[line_index].startswith(token):
+                              lines[line_index] = desired
+                              replaced = True
+                              break
+
+                      if not replaced:
+                          lines.insert(
+                              end,
+                              desired,
+                          )
+
+              path.write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8",
+              )
+
+
+          def verify_hive(path, patches):
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              for section, values in patches.items():
+
+                  if f"[{section}]" not in text:
+                      # Existing Wine-generated sections may include
+                      # modification timestamps after the closing bracket.
+                      section_found = False
+
+                      for line in text.splitlines():
+                          match = section_re.match(line)
+
+                          if match and match.group(1) == section:
+                              section_found = True
+                              break
+
+                      if not section_found:
+                          raise RuntimeError(
+                              f"Missing registry section {section} in {path}"
+                          )
+
+                  for name, (kind, value) in values.items():
+                      wanted = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      if wanted not in text:
+                          raise RuntimeError(
+                              f"Missing registry value {wanted} in {path}"
+                          )
+
+              print(f"Verified {path}")
+
+
+          patch_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          patch_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          # Keep default-user settings consistent if this hive exists.
+          if userdef_reg and userdef_reg.exists():
+              patch_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          verify_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          verify_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          if userdef_reg and userdef_reg.exists():
+              verify_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          print()
+          print("MapleStory registry patch validation PASSED")
+          PY
+
+          echo
+          echo "=== Repacking modified prefix ==="
+
+          tar cJf prefixPack.txz \
+            -C prefix_work \
+            .
+
+          test -s prefixPack.txz
+
+          echo
+          echo "=== Modified prefix pack ==="
+
+          ls -lh prefixPack.txz
+          sha256sum prefixPack.txz
+
+          echo
+          echo "=== Modified prefix contents ==="
+
+          tar tJf prefixPack.txz \
+            > modified-prefix-files.txt
+
+          grep -E \
+            '(^|/)(user|userdef|system)\.reg$' \
+            modified-prefix-files.txt
+
+          echo
+          echo "Prefix registry patch PASSED"
+
+      # ============================================================
+      # 7. ADD ONLY vcruntime140_threads.dll TO THE PACKAGED PREFIX
+      #
+      # Known-good 1.6 runtime variable:
+      #   - system32/vcruntime140_threads.dll
+      #   - syswow64/vcruntime140_threads.dll
+      #
+      # We deliberately do NOT replace ucrtbase.dll or the rest of the
+      # VC runtime set yet. Earlier MapleStory logs already showed several
+      # v14 runtime DLLs loading, while vcruntime140_threads.dll was not
+      # observed. This keeps the experiment narrow and reversible.
+      # ============================================================
+
+      - name: Add vcruntime140_threads.dll to packaged prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+
+          rm -rf prefix_runtime_work
+          mkdir -p prefix_runtime_work
+
+          tar -xJf prefixPack.txz \
+            -C prefix_runtime_work
+
+          DRIVE_C="$(find prefix_runtime_work -type d -name drive_c -print -quit)"
+
+          if [ -z "$DRIVE_C" ]; then
+            echo "ERROR: drive_c not found in prefix pack"
+            exit 1
+          fi
+
+          mkdir -p \
+            "$DRIVE_C/windows/system32" \
+            "$DRIVE_C/windows/syswow64"
+
+          cp -f \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cp -f \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          tar cJf prefixPack.txz \
+            -C prefix_runtime_work \
+            .
+
+          test -s prefixPack.txz
+
+          echo
+          echo "Packaged-prefix vcruntime140_threads.dll injection PASSED"
+
+      # ============================================================
+      # 8. STAGE REGISTRY-ONLY RECOVERY FOR THE EXISTING LIVE PREFIX
+      #
+      # The failed 1.7 nested regedit may have persisted some/all of the
+      # ten VC runtime native,builtin overrides into the existing user.reg.
+      # 2.0 restored the runtime files before its guest-side cmp failure,
+      # but its wine.inf registry recovery never got a chance to run.
+      #
+      # 2.2 therefore changes ONLY those ten values in the live
+      # Software\\Wine\\DllOverrides section. It derives their exact
+      # baseline from untouched prefixPack-arm64ec-11.txz at build time.
+      #
+      # IMPORTANT:
+      #   - No nested Wine/regedit invocation.
+      #   - No wine.inf mutation.
+      #   - No WINEDLLOVERRIDES.
+      #   - No live VC runtime copying.
+      #   - No esync / DXVK / Turnip changes.
+      #   - Recovery intentionally also runs for TestD3D.
+      # ============================================================
+
+      - name: Stage 2.2 live-prefix VC DllOverrides recovery
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+          RECOVERY_ROOT="$ROOT/share/wine/maplestory_registry_recovery_2_2"
+
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
+
+          rm -rf recovery_registry_base "$RECOVERY_ROOT"
+          mkdir -p recovery_registry_base "$RECOVERY_ROOT"
+
+          tar -xJf prefixPack-base.txz \
+            -C recovery_registry_base
+
+          BASE_USER_REG="$(find recovery_registry_base -type f -name user.reg -print -quit)"
+          test -n "$BASE_USER_REG"
+          test -s "$BASE_USER_REG"
+
+          # Extract only the ten values that 1.7 attempted to force.
+          # baseline-values.txt contains the exact raw Wine-registry lines
+          # present upstream; omitted values are intentionally absent.
+          python3 - \
+            "$BASE_USER_REG" \
+            "$RECOVERY_ROOT/baseline-values.txt" \
+            "$RECOVERY_ROOT/baseline-status.txt" <<'PYBASE'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          values_out = Path(sys.argv[2])
+          status_out = Path(sys.argv[3])
+
+          section = r"Software\\Wine\\DllOverrides"
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          target_set = set(targets)
+
+          lines = user_reg.read_text(encoding="utf-8", errors="strict").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+          value_re = re.compile(r'^"([^"]+)"=(.*)$')
+
+          in_section = False
+          found = {}
+
+          for line in lines:
+              match = section_re.match(line)
+              if match:
+                  in_section = match.group(1) == section
+                  continue
+
+              if not in_section:
+                  continue
+
+              match = value_re.match(line)
+              if not match:
+                  continue
+
+              name = match.group(1).lower()
+              if name not in target_set:
+                  continue
+
+              if name in found:
+                  raise RuntimeError(f"Duplicate upstream DllOverrides value: {name}")
+
+              found[name] = line
+
+          baseline_lines = [found[name] for name in targets if name in found]
+
+          values_out.write_text(
+              "\n".join(baseline_lines) + ("\n" if baseline_lines else ""),
+              encoding="utf-8",
+          )
+
+          status_lines = []
+          for name in targets:
+              if name in found:
+                  status_lines.append(f"present {name} {found[name]}")
+              else:
+                  status_lines.append(f"absent {name}")
+
+          status_out.write_text("\n".join(status_lines) + "\n", encoding="utf-8")
+
+          print("=== Upstream VC DllOverrides baseline ===")
+          print(status_out.read_text(encoding="utf-8"), end="")
+          PYBASE
+
+          test -f "$RECOVERY_ROOT/baseline-values.txt"
+          test -s "$RECOVERY_ROOT/baseline-status.txt"
+
+          cat > "$RECOVERY_ROOT/repair-user-reg.sh" <<'SHREPAIR'
+          #!/bin/sh
+          # Restore only the ten MapleStory VC runtime DllOverrides values in
+          # a Wine user.reg file. This intentionally uses simple POSIX shell
+          # operations available in GameNative's bionic guest.
+
+          USER_REG="$1"
+          BASELINE_VALUES="$2"
+
+          if [ -z "$USER_REG" ] || [ -z "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: repair helper missing arguments" >&2
+              exit 91
+          fi
+
+          if [ ! -f "$USER_REG" ]; then
+              echo "[GN-MS-2.2] ERROR: user.reg not found: $USER_REG" >&2
+              exit 92
+          fi
+
+          if [ ! -f "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: baseline-values.txt missing: $BASELINE_VALUES" >&2
+              exit 93
+          fi
+
+          TMP="${USER_REG}.gamenative-2.2.tmp"
+          rm -f "$TMP" || exit 94
+          : > "$TMP" || exit 94
+
+          IN_SECTION=0
+          SECTION_FOUND=0
+
+          while IFS= read -r LINE || [ -n "$LINE" ]; do
+              case "$LINE" in
+                  '[Software\\Wine\\DllOverrides]'*)
+                      printf '%s\n' "$LINE" >> "$TMP" || exit 94
+                      if [ -s "$BASELINE_VALUES" ]; then
+                          cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+                      fi
+                      IN_SECTION=1
+                      SECTION_FOUND=1
+                      continue
+                      ;;
+                  '['*)
+                      IN_SECTION=0
+                      ;;
+              esac
+
+              if [ "$IN_SECTION" -eq 1 ]; then
+                  case "$LINE" in
+                      \"[Cc][Oo][Nn][Cc][Rr][Tt]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_1\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_2\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Aa][Tt][Oo][Mm][Ii][Cc]_[Ww][Aa][Ii][Tt]\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Cc][Oo][Dd][Ee][Cc][Vv][Tt]_[Ii][Dd][Ss]\"=*|\
+                      \"[Uu][Cc][Rr][Tt][Bb][Aa][Ss][Ee]\"=*|\
+                      \"[Vv][Cc][Oo][Mm][Pp]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140_1\"=*)
+                          # Drop the live value. The exact upstream baseline
+                          # value (if one exists) was inserted at section start.
+                          continue
+                          ;;
+                  esac
+              fi
+
+              printf '%s\n' "$LINE" >> "$TMP" || exit 94
+          done < "$USER_REG"
+
+          # If the live hive had no DllOverrides section but upstream has one
+          # or more of our target values, append only those baseline values.
+          if [ "$SECTION_FOUND" -eq 0 ] && [ -s "$BASELINE_VALUES" ]; then
+              printf '\n[Software\\\\Wine\\\\DllOverrides]\n' >> "$TMP" || exit 94
+              cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+          fi
+
+          # Preserve user.reg's existing inode/mode by truncating and rewriting
+          # the original file instead of replacing it with mv.
+          cat "$TMP" > "$USER_REG" || exit 95
+          rm -f "$TMP" || exit 95
+
+          exit 0
+          SHREPAIR
+
+          chmod 755 "$RECOVERY_ROOT/repair-user-reg.sh"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
+
+          # ----------------------------------------------------------
+          # Build-time simulation of the exact repair helper.
+          # Create a synthetic live user.reg with all ten 1.7 values forced
+          # to native,builtin plus an unrelated sentinel override, run the
+          # helper, then verify the ten values exactly match upstream and the
+          # sentinel survives.
+          # ----------------------------------------------------------
+
+          cp "$BASE_USER_REG" recovery-user-reg-test.reg
+
+          python3 - recovery-user-reg-test.reg <<'PYCONTAM'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          section = r"Software\\Wine\\DllOverrides"
+          forced = {
+              "concrt140": "native,builtin",
+              "msvcp140": "native,builtin",
+              "msvcp140_1": "native,builtin",
+              "msvcp140_2": "native,builtin",
+              "msvcp140_atomic_wait": "native,builtin",
+              "msvcp140_codecvt_ids": "native,builtin",
+              "ucrtbase": "native,builtin",
+              "vcomp140": "native,builtin",
+              "vcruntime140": "native,builtin",
+              "vcruntime140_1": "native,builtin",
+              "gamenative_2_2_sentinel": "builtin",
+          }
+
+          lines = path.read_text(encoding="utf-8").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+          start = None
+          end = None
+          for i, line in enumerate(lines):
+              m = section_re.match(line)
+              if m and m.group(1) == section:
+                  start = i
+                  end = len(lines)
+                  for j in range(i + 1, len(lines)):
+                      if section_re.match(lines[j]):
+                          end = j
+                          break
+                  break
+
+          entries = [f'"{name}"="{value}"' for name, value in forced.items()]
+
+          if start is None:
+              if lines and lines[-1] != "":
+                  lines.append("")
+              lines.append(f"[{section}]")
+              lines.extend(entries)
+          else:
+              target_names = {name.lower() for name in forced}
+              kept = []
+              for line in lines[start + 1:end]:
+                  m = re.match(r'^"([^"]+)"=', line)
+                  if m and m.group(1).lower() in target_names:
+                      continue
+                  kept.append(line)
+              lines[start + 1:end] = entries + kept
+
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PYCONTAM
+
+          "$RECOVERY_ROOT/repair-user-reg.sh" \
+            recovery-user-reg-test.reg \
+            "$RECOVERY_ROOT/baseline-values.txt"
+
+          python3 - \
+            "$BASE_USER_REG" \
+            recovery-user-reg-test.reg <<'PYVERIFY'
+          import re
+          import sys
+          from pathlib import Path
+
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          section = r"Software\\Wine\\DllOverrides"
+
+          def read_values(path):
+              lines = Path(path).read_text(encoding="utf-8").splitlines()
+              section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+              value_re = re.compile(r'^"([^"]+)"=(.*)$')
+              in_section = False
+              values = {}
+              for line in lines:
+                  m = section_re.match(line)
+                  if m:
+                      in_section = m.group(1) == section
+                      continue
+                  if not in_section:
+                      continue
+                  m = value_re.match(line)
+                  if m:
+                      values[m.group(1).lower()] = line
+              return values
+
+          base = read_values(sys.argv[1])
+          repaired = read_values(sys.argv[2])
+
+          for name in targets:
+              if base.get(name) != repaired.get(name):
+                  raise RuntimeError(
+                      f"Repair mismatch for {name}: upstream={base.get(name)!r} repaired={repaired.get(name)!r}"
+                  )
+
+          sentinel = repaired.get("gamenative_2_2_sentinel")
+          if sentinel != '"gamenative_2_2_sentinel"="builtin"':
+              raise RuntimeError(f"Unrelated sentinel was not preserved: {sentinel!r}")
+
+          print("Synthetic live-user.reg recovery simulation PASSED")
+          PYVERIFY
+
+          # Preserve the original Wine launcher as wine.real and install the
+          # thin one-time live-registry recovery wrapper.
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
+
+          rm -f "$ROOT/bin/wine.real"
+          ln -s ../lib/wine/aarch64-unix/wine "$ROOT/bin/wine.real"
+          rm -f "$ROOT/bin/wine"
+
+          cat > "$ROOT/bin/wine" <<'SHWRAP'
+          #!/bin/sh
+          # GameNative MapleStory 216150 registry-only recovery shim (2.2).
+          # Repair the ten VC DllOverrides values potentially persisted by the
+          # failed 1.7 regedit attempt, then immediately launch the real Wine.
+
+          # Do not use command substitution. GameNative's LD_PRELOAD evshim
+          # writes startup messages to stdout and can corrupt captured output.
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-2.2] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          ROOT_DIR="${SCRIPT_DIR%/*}"
+          REAL_WINE="$SCRIPT_DIR/wine.real"
+          RECOVERY_ROOT="$ROOT_DIR/share/wine/maplestory_registry_recovery_2_2"
+          REPAIR_SCRIPT="$RECOVERY_ROOT/repair-user-reg.sh"
+          BASELINE_VALUES="$RECOVERY_ROOT/baseline-values.txt"
+
+          if [ ! -x "$REAL_WINE" ]; then
+              echo "[GN-MS-2.2] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              exit 52
+          fi
+
+          PREFIX="${WINEPREFIX:-}"
+
+          if [ -n "$PREFIX" ]; then
+              USER_REG="$PREFIX/user.reg"
+              MARKER="$PREFIX/.gamenative-maplestory-dlloverrides-recovery-2.2"
+
+              if [ -f "$USER_REG" ]; then
+                  if [ ! -f "$MARKER" ]; then
+                      if [ ! -x "$REPAIR_SCRIPT" ] || [ ! -f "$BASELINE_VALUES" ]; then
+                          echo "[GN-MS-2.2] ERROR: packaged registry recovery payload missing" >&2
+                          exit 90
+                      fi
+
+                      echo "[GN-MS-2.2] Restoring VC DllOverrides baseline in $USER_REG" >&2
+
+                      "$REPAIR_SCRIPT" "$USER_REG" "$BASELINE_VALUES" || exit $?
+
+                      {
+                          echo "GameNative MapleStory VC DllOverrides recovery 2.2"
+                          echo "Recovered=concrt140,msvcp140,msvcp140_1,msvcp140_2,msvcp140_atomic_wait,msvcp140_codecvt_ids,ucrtbase,vcomp140,vcruntime140,vcruntime140_1"
+                          echo "Source=untouched prefixPack-arm64ec-11.txz baseline"
+                          echo "RuntimeFiles=unchanged by 2.2 live recovery"
+                          echo "WineInf=unchanged"
+                      } > "$MARKER" || exit 96
+
+                      echo "[GN-MS-2.2] Registry recovery complete; VC DllOverrides match Proton 11 baseline" >&2
+                  else
+                      echo "[GN-MS-2.2] Registry recovery marker already present" >&2
+                  fi
+              else
+                  # A genuinely new prefix will use the already-patched
+                  # prefixPack.txz; do not block Wine initialization.
+                  echo "[GN-MS-2.2] user.reg not ready; deferring live registry recovery" >&2
+              fi
+          fi
+
+          exec "$REAL_WINE" "$@"
+          SHWRAP
+
+          chmod 755 "$ROOT/bin/wine"
+
+          echo
+          echo "=== Validate 2.2 registry recovery wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -L "$ROOT/bin/wine.real"
+          test -e "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+          test "$(readlink "$ROOT/bin/wine.real")" = "../lib/wine/aarch64-unix/wine"
+
+          sh -n "$ROOT/bin/wine"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
+
+          grep -Fq 'Restoring VC DllOverrides baseline' "$ROOT/bin/wine"
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' "$ROOT/bin/wine"
+          grep -Fq 'repair-user-reg.sh' "$ROOT/bin/wine"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
+
+          if grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"; then
+              echo "ERROR: 2.2 must not bypass registry recovery for TestD3D"
+              exit 1
+          fi
+
+          if grep -Fq 'WINEDLLOVERRIDES' "$ROOT/bin/wine"; then
+              echo "ERROR: WINEDLLOVERRIDES leaked into 2.2"
+              exit 1
+          fi
+
+          if grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
+              echo "ERROR: nested regedit leaked into 2.2"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$ROOT/bin/wine"; then
+              echo "ERROR: guest wrapper depends on cmp"
+              exit 1
+          fi
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" || \
+             grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: wrapper contains stdout-capturing path command substitution"
+              exit 1
+          fi
+
+          echo
+          echo "2.2 live-prefix registry-only recovery wrapper PASSED"
+
+      # ============================================================
+      # 9. STAGE 3.8 CLEAN-RUN NGS / BLACKCIPHER LOG COLLECTOR
+      #
+      # 3.7 finished the process-lifecycle work. 3.8 deliberately removes
+      # every watcher and returns normal MapleStory launches to a clean
+      # pass-through into the proven 2.2 registry wrapper.
+      #
+      # Collection happens ONLY when TestD3D.exe is launched after the
+      # failed MapleStory run. At that point the wrapper prints existing
+      # BlackCipher / NGS / Nexon / steam-connector text logs to stdout so
+      # they are captured by the normal GameNative logcat export.
+      #
+      # NO Wine compatibility setting is changed:
+      # - no WINEDEBUG
+      # - no WINEESYNC change
+      # - no WINEDLLOVERRIDES
+      # - no registry/runtime/prefix change beyond the proven 2.2 layer
+      # - no process watcher
+      # - no DXVK/Turnip/graphics change
+      # - no deletion or truncation of target logs
+      # ============================================================
+
+      - name: Stage 3.8 clean-run NGS log collector wrapper
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+          INNER_WINE="$ROOT/bin/wine.2.2-registry"
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -L "$ROOT/bin/wine.real"
+          test -e "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+
+          # Preserve the proven 2.2 registry wrapper as the inner launcher.
+          # Normal MapleStory launches are a clean pass-through: the collector
+          # does no scanning, file reading, process watching, environment
+          # changes, or log deletion before exec'ing the known-good wrapper.
+          rm -f "$INNER_WINE"
+          mv "$ROOT/bin/wine" "$INNER_WINE"
+          chmod 755 "$INNER_WINE"
+          sh -n "$INNER_WINE"
+
+          cat > "$ROOT/bin/wine" <<'SHCOLLECT'
+          #!/bin/sh
+          # GameNative MapleStory 3.8 clean-run log collector.
+          #
+          # NORMAL LAUNCH:
+          #   immediately exec the proven 2.2 registry wrapper.
+          #
+          # TESTD3D LAUNCH:
+          #   dump text logs left by the previous MapleStory/NGS/BlackCipher
+          #   run to stdout/logcat, then continue into TestD3D normally.
+          #
+          # This wrapper never enables WINEDEBUG, changes esync, changes DLL
+          # overrides, runs regedit, deletes NGS files, or watches processes.
+
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-3.8] ERROR wrapper invoked without a path: $0"
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          INNER_WINE="$SCRIPT_DIR/wine.2.2-registry"
+
+          if [ ! -x "$INNER_WINE" ]; then
+              echo "[GN-MS-3.8] ERROR inner 2.2 Wine wrapper missing: $INNER_WINE"
+              exit 52
+          fi
+
+          IS_TESTD3D=0
+          for ARG in "$@"; do
+              case "$ARG" in
+                  *TestD3D.exe*|*TESTD3D.EXE*|*testd3d.exe*)
+                      IS_TESTD3D=1
+                      ;;
+              esac
+          done
+
+          # Clean MapleStory path: do absolutely nothing except chain into 2.2.
+          if [ "$IS_TESTD3D" -eq 0 ]; then
+              exec "$INNER_WINE" "$@"
+          fi
+
+          echo "[GN-MS-3.8] COLLECTION START trigger=TestD3D post_failure_collection=1"
+          echo "[GN-MS-3.8] WINEPREFIX=${WINEPREFIX:-<unset>}"
+          echo "[GN-MS-3.8] NOTE normal MapleStory launch path is pass-through and uninstrumented"
+
+          PREFIX="${WINEPREFIX:-}"
+          if [ -z "$PREFIX" ]; then
+              echo "[GN-MS-3.8] COLLECTION ERROR WINEPREFIX is unset"
+              exec "$INNER_WINE" "$@"
+          fi
+
+          A_DRIVE="$PREFIX/dosdevices/a:"
+          USERROOT="$PREFIX/drive_c/users/xuser"
+
+          dump_text_file() {
+              FILE="$1"
+              LABEL="$2"
+
+              [ -f "$FILE" ] || return 0
+
+              echo "[GN-MS-3.8] FILE BEGIN label=$LABEL path=$FILE"
+
+              LINE_NO=0
+              TRUNCATED=0
+
+              # Pure shell read/printf: no cat/tail/find subprocesses are
+              # injected into the GameNative environment during collection.
+              while IFS= read -r LINE || [ -n "$LINE" ]; do
+                  LINE_NO=$((LINE_NO + 1))
+
+                  if [ "$LINE_NO" -le 4000 ]; then
+                      printf '[GN-MS-3.8-FILE:%s:%04d] %s\n' \
+                        "$LABEL" "$LINE_NO" "$LINE"
+                  else
+                      TRUNCATED=1
+                      break
+                  fi
+              done < "$FILE"
+
+              echo "[GN-MS-3.8] FILE END label=$LABEL lines_emitted=$LINE_NO truncated=$TRUNCATED"
+          }
+
+          note_binary_file() {
+              FILE="$1"
+              LABEL="$2"
+
+              [ -f "$FILE" ] || return 0
+              echo "[GN-MS-3.8] BINARY FOUND label=$LABEL path=$FILE"
+          }
+
+          dump_root() {
+              ROOTPATH="$1"
+              LABELROOT="$2"
+
+              if [ ! -d "$ROOTPATH" ]; then
+                  echo "[GN-MS-3.8] ROOT MISSING label=$LABELROOT path=$ROOTPATH"
+                  return 0
+              fi
+
+              echo "[GN-MS-3.8] ROOT FOUND label=$LABELROOT path=$ROOTPATH"
+
+              for FILE in \
+                  "$ROOTPATH"/*.log \
+                  "$ROOTPATH"/*.txt \
+                  "$ROOTPATH"/*.LOG \
+                  "$ROOTPATH"/*.TXT \
+                  "$ROOTPATH"/*/*.log \
+                  "$ROOTPATH"/*/*.txt \
+                  "$ROOTPATH"/*/*.LOG \
+                  "$ROOTPATH"/*/*.TXT
+              do
+                  [ -f "$FILE" ] || continue
+                  dump_text_file "$FILE" "$LABELROOT"
+              done
+
+              for FILE in \
+                  "$ROOTPATH"/*.dmp \
+                  "$ROOTPATH"/*.DMP \
+                  "$ROOTPATH"/*.mdmp \
+                  "$ROOTPATH"/*.MDMP \
+                  "$ROOTPATH"/*/*.dmp \
+                  "$ROOTPATH"/*/*.DMP \
+                  "$ROOTPATH"/*/*.mdmp \
+                  "$ROOTPATH"/*/*.MDMP
+              do
+                  [ -f "$FILE" ] || continue
+                  note_binary_file "$FILE" "$LABELROOT"
+              done
+          }
+
+          # Primary anti-cheat locations.
+          dump_root "$A_DRIVE/BlackCipher" "BLACKCIPHER"
+          dump_root "$PREFIX/drive_c/ProgramData/Nexon/NGS" "NGS"
+
+          # Nexon / launcher-side logs that may explain an orderly shutdown.
+          dump_root "$USERROOT/AppData/Roaming/NexonLauncher" "NEXONLAUNCHER_ROAMING"
+          dump_root "$USERROOT/AppData/Local/Nexon" "NEXON_LOCAL"
+          dump_root "$USERROOT/AppData/LocalLow/Nexon" "NEXON_LOCALLOW"
+
+          # NXSteam / Steam connector logs can help if the anti-cheat logs are
+          # clean and the failure is actually ticket/callback related.
+          dump_root "$USERROOT/AppData/Roaming/steam-connector" "STEAM_CONNECTOR"
+
+          echo "[GN-MS-3.8] COLLECTION COMPLETE"
+          echo "[GN-MS-3.8] Continuing into TestD3D"
+
+          exec "$INNER_WINE" "$@"
+          SHCOLLECT
+
+          chmod 755 "$ROOT/bin/wine"
+
+          echo
+          echo "=== Validate 3.8 clean collector wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -x "$INNER_WINE"
+
+          sh -n "$ROOT/bin/wine"
+          sh -n "$INNER_WINE"
+
+          grep -Fq 'COLLECTION START trigger=TestD3D post_failure_collection=1' "$ROOT/bin/wine"
+          grep -Fq 'COLLECTION COMPLETE' "$ROOT/bin/wine"
+          grep -Fq 'dosdevices/a:' "$ROOT/bin/wine"
+          grep -Fq '/BlackCipher' "$ROOT/bin/wine"
+          grep -Fq '/ProgramData/Nexon/NGS' "$ROOT/bin/wine"
+          grep -Fq '/AppData/Roaming/NexonLauncher' "$ROOT/bin/wine"
+          grep -Fq '/AppData/Local/Nexon' "$ROOT/bin/wine"
+          grep -Fq '/AppData/LocalLow/Nexon' "$ROOT/bin/wine"
+          grep -Fq '/AppData/Roaming/steam-connector' "$ROOT/bin/wine"
+          grep -Fq 'exec "$INNER_WINE" "$@"' "$ROOT/bin/wine"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$INNER_WINE"
+
+          # The normal launch path must be clean.
+          if grep -Fq 'WINEDLLOVERRIDES=' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEESYNC=' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEDEBUG=' "$ROOT/bin/wine" || \
+             grep -Fq 'regedit /S' "$ROOT/bin/wine" || \
+             grep -Fq '/proc/' "$ROOT/bin/wine" || \
+             grep -Fq 'pthread' "$ROOT/bin/wine"; then
+              echo "ERROR: behavior-changing or process-watching logic leaked into 3.8 collector"
+              exit 1
+          fi
+
+          # Collector must never remove or truncate target logs.
+          if grep -Eq '(^|[[:space:]])(rm|truncate)([[:space:]]|$)' "$ROOT/bin/wine"; then
+              echo "ERROR: 3.8 collector contains destructive log-file operation"
+              exit 1
+          fi
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: 3.8 wrapper contains stdout-capturing path command substitution"
+              exit 1
+          fi
+
+          echo "3.8 clean NGS log collector wrapper PASSED"
+
+      # ============================================================
+      # 10. CREATE NEW 3.8 GAMENATIVE PROFILE
+      # ============================================================
+
+      - name: Generate GameNative Proton profile
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat > profile.json <<'EOF'
+          {
+            "type": "Proton",
+            "versionName": "11.0-3.8-arm64ec",
+            "versionCode": 2,
+            "description": "MapleStory 3.8 - GE-Proton11-3 ARM64EC game-fixes runtime + known-good 2.2 prefix/runtime/registry state + clean normal launch + TestD3D-triggered NGS/BlackCipher log collector",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          EOF
+
+          cat profile.json
+
+          grep -Fq \
+            '"versionName": "11.0-3.8-arm64ec"' \
+            profile.json
+
+          echo "3.8 profile validation PASSED"
+
+      # ============================================================
+      # 11. BUILD THE NEW 3.8 WCP
+      # ============================================================
+
+      - name: Build WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+
+          cp prefixPack.txz \
+            "$ROOT/prefixPack.txz"
+
+          cp profile.json \
+            "$ROOT/profile.json"
+
+          cd "$ROOT"
+
+          tar cJf \
+            "$GITHUB_WORKSPACE/$WCP_NAME" \
+            bin \
+            lib \
+            share \
+            prefixPack.txz \
+            profile.json
+
+          ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
+
+      # ============================================================
+      # 12. VALIDATE FINAL 3.8 WCP
+      # ============================================================
+
+      - name: Validate final WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          WCP="$GITHUB_WORKSPACE/$WCP_NAME"
+
+          test -f "$WCP"
+          test -s "$WCP"
+          xz -t "$WCP"
+
+          tar tJf "$WCP" > wcp-files.txt
+
+          for f in \
+            bin/wine \
+            bin/wine.2.2-registry \
+            bin/wine.real \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh \
+            prefixPack.txz \
+            profile.json
+          do
+            grep -Fxq "$f" wcp-files.txt
+            echo "FOUND: $f"
+          done
+
+          # 3.8 intentionally contains no process watcher payload.
+          if grep -Fq 'share/wine/maplestory_diag_' wcp-files.txt; then
+            echo "ERROR: stale diagnostic watcher payload leaked into 3.8"
+            exit 1
+          fi
+
+          tar xJOf "$WCP" profile.json > packaged-profile.json
+          grep -Fq \
+            '"versionName": "11.0-3.8-arm64ec"' \
+            packaged-profile.json
+
+          rm -rf wcp_validation
+          mkdir -p wcp_validation
+
+          tar xJf "$WCP" \
+            -C wcp_validation \
+            bin/wine \
+            bin/wine.2.2-registry \
+            bin/wine.real \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          test -f wcp_validation/bin/wine
+          test ! -L wcp_validation/bin/wine
+          test -x wcp_validation/bin/wine
+          test -x wcp_validation/bin/wine.2.2-registry
+          test -L wcp_validation/bin/wine.real
+          test -e wcp_validation/bin/wine.real
+          test -x wcp_validation/bin/wine.real
+          test "$(readlink wcp_validation/bin/wine.real)" = "../lib/wine/aarch64-unix/wine"
+          test -x wcp_validation/bin/wineserver
+          test -x wcp_validation/lib/wine/aarch64-unix/wine
+          test -x wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          sh -n wcp_validation/bin/wine
+          sh -n wcp_validation/bin/wine.2.2-registry
+          sh -n wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          grep -Fq 'COLLECTION START trigger=TestD3D post_failure_collection=1' wcp_validation/bin/wine
+          grep -Fq 'COLLECTION COMPLETE' wcp_validation/bin/wine
+          grep -Fq 'dosdevices/a:' wcp_validation/bin/wine
+          grep -Fq '/BlackCipher' wcp_validation/bin/wine
+          grep -Fq '/ProgramData/Nexon/NGS' wcp_validation/bin/wine
+          grep -Fq '/AppData/Roaming/NexonLauncher' wcp_validation/bin/wine
+          grep -Fq '/AppData/Local/Nexon' wcp_validation/bin/wine
+          grep -Fq '/AppData/LocalLow/Nexon' wcp_validation/bin/wine
+          grep -Fq '/AppData/Roaming/steam-connector' wcp_validation/bin/wine
+          grep -Fq 'exec "$INNER_WINE" "$@"' wcp_validation/bin/wine
+          grep -Fq '*TestD3D.exe*' wcp_validation/bin/wine
+
+          if grep -Fq 'WINEDLLOVERRIDES=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEESYNC=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEDEBUG=' wcp_validation/bin/wine || \
+             grep -Fq 'regedit /S' wcp_validation/bin/wine || \
+             grep -Fq '/proc/' wcp_validation/bin/wine; then
+              echo "ERROR: behavior-changing/process-watching logic leaked into packaged 3.8 collector"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])(rm|truncate)([[:space:]]|$)' wcp_validation/bin/wine; then
+              echo "ERROR: packaged 3.8 collector contains destructive log-file operation"
+              exit 1
+          fi
+
+          grep -Fq 'Restoring VC DllOverrides baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine.2.2-registry
+
+          if grep -Fq 'WINEDLLOVERRIDES=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEESYNC=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEDEBUG=' wcp_validation/bin/wine || \
+             grep -Fq 'regedit /S' wcp_validation/bin/wine; then
+              echo "ERROR: behavior-changing Wine setting leaked into packaged 3.8 collector wrapper"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/bin/wine; then
+              echo "ERROR: packaged 3.8 guest wrapper depends on cmp"
+              exit 1
+          fi
+
+          echo "=== Packaged upstream DllOverrides baseline ==="
+          cat wcp_validation/share/wine/maplestory_registry_recovery_2_2/baseline-status.txt
+
+          # Confirm 2.2 did not mutate wine.inf for live-prefix recovery.
+          grep -Fxq 'share/wine/wine.inf' wcp-files.txt
+          tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
+
+          if grep -Fq 'GameNativeMapleStory216150Recovery' packaged-wine.inf; then
+              echo "ERROR: live registry recovery leaked into wine.inf"
+              exit 1
+          fi
+
+          if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
+             grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
+              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 3.8"
+              exit 1
+          fi
+
+          # Packaged prefix remains the controlled 1.6-compatible state for
+          # genuinely new prefixes: MapleStory registry fixes plus only
+          # vcruntime140_threads.dll added to the untouched VC file baseline.
+          tar xJOf "$WCP" prefixPack.txz > packaged-prefix.txz
+          rm -rf packaged_prefix packaged_base_prefix
+          mkdir -p packaged_prefix packaged_base_prefix
+          tar xJf packaged-prefix.txz -C packaged_prefix
+          tar xJf prefixPack-base.txz -C packaged_base_prefix
+
+          PREFIX_DRIVE_C="$(find packaged_prefix -type d -name drive_c -print -quit)"
+          BASE_DRIVE_C="$(find packaged_base_prefix -type d -name drive_c -print -quit)"
+          USER_REG="$(find packaged_prefix -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find packaged_prefix -type f -name system.reg -print -quit)"
+
+          test -n "$PREFIX_DRIVE_C"
+          test -n "$BASE_DRIVE_C"
+          test -n "$USER_REG"
+          test -n "$SYSTEM_REG"
+
+          grep -Fq '"UseTakeFocus"="N"' "$USER_REG"
+          grep -Fq '"UseLinuxInputEvents"="Y"' "$USER_REG"
+          grep -Fq '"KeyboardUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"MouseUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"Version"="win10"' "$USER_REG"
+          grep -Fq '"cb_access_map_w"=dword:00000001' "$USER_REG"
+          grep -Fq '"CSMT"="disabled"' "$USER_REG"
+          grep -Fq '"URL Protocol"=""' "$SYSTEM_REG"
+
+          SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll'
+          WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll'
+
+          for DLL in $SYS32_LIST; do
+            BASE="$BASE_DRIVE_C/windows/system32/$DLL"
+            GOT="$PREFIX_DRIVE_C/windows/system32/$DLL"
+            if [ -f "$BASE" ]; then
+              test -f "$GOT"
+              cmp -s "$BASE" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done
+
+          for DLL in $WOW64_LIST; do
+            BASE="$BASE_DRIVE_C/windows/syswow64/$DLL"
+            GOT="$PREFIX_DRIVE_C/windows/syswow64/$DLL"
+            if [ -f "$BASE" ]; then
+              test -f "$GOT"
+              cmp -s "$BASE" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done
+
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/system32/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          echo "Packaged prefix validation PASSED"
+
+          sha256sum "$WCP"
+
+          echo "=========================================="
+          echo "3.8 WCP validation PASSED"
+          echo "=========================================="
+
+      # ============================================================
+      # 13. UPLOAD 3.8 WCP
+      # ============================================================
+
+      - name: Upload MapleStory 3.8 Clean NGS Log Collector WCP
+        uses: actions/upload-artifact@v4
+        with:
+          name: proton-11.0-3.8-arm64ec
+          path: proton-11.0-3.8-arm64ec.wcp
+          if-no-files-found: error
+          retention-days: 30
