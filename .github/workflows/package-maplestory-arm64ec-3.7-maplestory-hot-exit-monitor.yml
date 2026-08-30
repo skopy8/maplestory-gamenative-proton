@@ -1,0 +1,2544 @@
+name: Package MapleStory ARM64EC 3.7 MapleStory Hot Exit Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful 3.1 workflow run ID containing compiled-proton-arm64ec-ge11.0-3-gamefixes-checkpoint"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+
+    env:
+      # Reuse the already-compiled GE-Proton11-3 ARM64EC game-fixes runtime.
+      # This workflow does NOT rebuild Wine.
+      CHECKPOINT_ARTIFACT: "compiled-proton-arm64ec-ge11.0-3-gamefixes-checkpoint"
+
+      # Exact GameNative Proton 11 ARM64EC prefix-pack commit used by 3.1/2.2.
+      PREFIX_COMMIT: "450f670aa65243b2e7b5364d9577eb23f17b6855"
+
+      # Same pinned Microsoft runtime payload source used by 2.2/3.1.
+      RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
+
+      CUSTOM_VERSION: "11.0-3.7-arm64ec"
+      WCP_NAME: "proton-11.0-3.7-arm64ec.wcp"
+
+    steps:
+      # ============================================================
+      # 1. RESTORE THE SUCCESSFUL 3.1 COMPILED CHECKPOINT
+      # ============================================================
+
+      - name: Download 3.1 compiled ARM64EC checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CHECKPOINT_ARTIFACT }}
+          path: checkpoint_download
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Restore and validate 3.1 compiled runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CHECKPOINT="$(find checkpoint_download -type f -name 'compiled-proton-checkpoint.tar' -print -quit)"
+          test -n "$CHECKPOINT"
+          test -s "$CHECKPOINT"
+
+          ROOT="$HOME/compiled-files-aarch64"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT"
+
+          tar -C "$ROOT" -xf "$CHECKPOINT"
+
+          test -d "$ROOT/bin"
+          test -d "$ROOT/lib"
+          test -d "$ROOT/share"
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
+          test -e "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wineserver"
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
+
+          chmod 755 "$ROOT/lib/wine/aarch64-unix/wine"
+          chmod 755 "$ROOT/bin/wineserver"
+          find "$ROOT/bin" -maxdepth 1 -type f -name 'wine*' -exec chmod 755 {} \;
+
+          echo "=== Reused 3.1 GE-Proton11-3 compiled runtime ==="
+          du -sh "$ROOT"
+          ls -lah "$ROOT/bin" | sed -n '1,100p'
+          sha256sum "$CHECKPOINT"
+
+          echo "3.1 compiled checkpoint restore PASSED"
+
+      # ============================================================
+      # From here onward, reproduce the known-good 3.1 packaging state,
+      # then add only the observation-only 3.7 MapleStory hot-exit watcher.
+      # ============================================================
+
+      - name: Checkout pinned MapleStory VC runtime payload
+        uses: actions/checkout@v4
+        with:
+          repository: oldschoola/linux_maplestory
+          ref: ${{ env.RUNTIME_COMMIT }}
+          path: maplestory_reference
+          sparse-checkout: |
+            files/vc_runtime
+            patches/13-apply-runtime-file-patches.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate pinned VC runtime payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+
+          SYS32=(
+            concrt140.dll
+            msvcp140.dll
+            msvcp140_1.dll
+            msvcp140_2.dll
+            msvcp140_atomic_wait.dll
+            msvcp140_codecvt_ids.dll
+            ucrtbase.dll
+            vccorlib140.dll
+            vcomp140.dll
+            vcruntime140.dll
+            vcruntime140_1.dll
+            vcruntime140_threads.dll
+          )
+
+          WOW64=(
+            concrt140.dll
+            msvcp140.dll
+            msvcp140_1.dll
+            msvcp140_2.dll
+            msvcp140_atomic_wait.dll
+            msvcp140_codecvt_ids.dll
+            ucrtbase.dll
+            vccorlib140.dll
+            vcomp140.dll
+            vcruntime140.dll
+            vcruntime140_threads.dll
+          )
+
+          for dll in "${SYS32[@]}"; do
+            test -s "$ROOT/system32/$dll"
+          done
+
+          for dll in "${WOW64[@]}"; do
+            test -s "$ROOT/syswow64/$dll"
+          done
+
+          echo "=== Runtime payload commit ==="
+          git -C "$GITHUB_WORKSPACE/maplestory_reference" rev-parse HEAD
+          test "$(git -C "$GITHUB_WORKSPACE/maplestory_reference" rev-parse HEAD)" = "$RUNTIME_COMMIT"
+
+          echo
+          echo "=== system32 payload ==="
+          for dll in "${SYS32[@]}"; do
+            file "$ROOT/system32/$dll"
+            sha256sum "$ROOT/system32/$dll"
+          done
+
+          echo
+          echo "=== syswow64 payload ==="
+          for dll in "${WOW64[@]}"; do
+            file "$ROOT/syswow64/$dll"
+            sha256sum "$ROOT/syswow64/$dll"
+          done
+
+          echo
+          echo "Pinned VC runtime payload validation PASSED"
+
+      # ============================================================
+      # 5. DOWNLOAD THE CORRECT PROTON 11 ARM64EC PREFIX
+      #
+      # IMPORTANT:
+      # Use prefixPack-arm64ec-11.txz.
+      # Do NOT use the generic prefixPack-arm64ec.txz.
+      # ============================================================
+
+      - name: Download GameNative Proton 11 ARM64EC prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          wget \
+            https://raw.githubusercontent.com/GameNative/bionic-prefix-files/450f670aa65243b2e7b5364d9577eb23f17b6855/prefixPack-arm64ec-11.txz \
+            -O prefixPack-base.txz
+
+          test -s prefixPack-base.txz
+
+          echo
+          echo "=== Base prefix pack ==="
+
+          ls -lh prefixPack-base.txz
+          file prefixPack-base.txz
+          sha256sum prefixPack-base.txz
+
+      # ============================================================
+      # 6. APPLY THE MAPLESTORY REGISTRY FIXES
+      #
+      # Carry forward the known-good registry layer unchanged.
+      # The only runtime payload remains vcruntime140_threads.dll.
+      # The Wine rebuild already occurred above; no additional source changes here.
+      # ============================================================
+
+      - name: Patch MapleStory registry settings into prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf prefix_work
+          mkdir -p prefix_work
+
+          tar -xJf prefixPack-base.txz \
+            -C prefix_work
+
+          echo "=== Prefix structure ==="
+
+          find prefix_work \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p\n' \
+            > prefix-files-before.txt
+
+          sed -n '1,150p' prefix-files-before.txt
+
+          USER_REG="$(find prefix_work -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find prefix_work -type f -name system.reg -print -quit)"
+          USERDEF_REG="$(find prefix_work -type f -name userdef.reg -print -quit || true)"
+
+          if [ -z "$USER_REG" ]; then
+            echo "ERROR: user.reg not found in prefix."
+            exit 1
+          fi
+
+          if [ -z "$SYSTEM_REG" ]; then
+            echo "ERROR: system.reg not found in prefix."
+            exit 1
+          fi
+
+          echo
+          echo "=== Registry hives ==="
+
+          echo "user.reg:    $USER_REG"
+          echo "system.reg:  $SYSTEM_REG"
+          echo "userdef.reg: ${USERDEF_REG:-not present}"
+
+          python3 - \
+            "$USER_REG" \
+            "$SYSTEM_REG" \
+            "${USERDEF_REG:-}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          system_reg = Path(sys.argv[2])
+          userdef_arg = sys.argv[3]
+          userdef_reg = Path(userdef_arg) if userdef_arg else None
+
+
+          def string_value(value):
+              value = value.replace("\\", "\\\\")
+              value = value.replace('"', '\\"')
+              return f'"{value}"'
+
+
+          def value_name(name):
+              if name is None:
+                  return "@"
+
+              escaped = name.replace("\\", "\\\\")
+              escaped = escaped.replace('"', '\\"')
+
+              return f'"{escaped}"'
+
+
+          def render(name, kind, value):
+              prefix = value_name(name) + "="
+
+              if kind == "str":
+                  return prefix + string_value(value)
+
+              if kind == "dword":
+                  return prefix + f"dword:{value:08x}"
+
+              raise ValueError(f"Unknown value type: {kind}")
+
+
+          # Wine's internal registry-file format is similar to REGEDIT.
+          # These paths are relative to HKCU inside user.reg.
+
+          USER_PATCHES = {
+              r"Software\\Wine\\X11 Driver": {
+                  "UseTakeFocus": ("str", "N"),
+                  "Grab": ("str", "N"),
+                  "GrabFullscreen": ("str", "N"),
+                  "UseLinuxInputEvents": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\DirectInput": {
+                  "UseLinuxInputEvents": ("str", "Y"),
+                  "KeyboardUseNonExclusive": ("str", "Y"),
+                  "MouseUseNonExclusive": ("str", "Y"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\MapleStory.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\nxsteam.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Wine\\AppDefaults\\SteamConnectorHelper.exe": {
+                  "Version": ("str", "win10"),
+              },
+
+              r"Software\\Nexon Launcher": {
+                  "Install Directory": ("str", r"C:\Nexon\Launcher"),
+                  "Region": ("str", "1"),
+                  "User Data": (
+                      "str",
+                      '{"setup-id":"372e7640-20f4-419c-ada0-4ad0d76c33d9","time":1748271149}',
+                  ),
+              },
+
+              r"Software\\Wine\\Direct3D": {
+                  "cb_access_map_w": ("dword", 1),
+                  "CSMT": ("str", "disabled"),
+              },
+          }
+
+
+          # These paths are relative to HKLM inside system.reg.
+
+          SYSTEM_PATCHES = {
+              r"Software\\Classes\\Applications\\nexon_launcher.exe\\shell\\open": {
+                  "FriendlyAppName": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl": {
+                  None: ("str", "URL:nxl protocol"),
+                  "URL Protocol": ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\DefaultIcon": {
+                  None: ("str", r"C:\Nexon\Launcher\nexon_launcher.exe"),
+              },
+
+              r"Software\\Classes\\nxl\\shell": {
+                  None: ("str", ""),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open": {
+                  None: ("str", ""),
+                  "Friendly App Name": ("str", "Nexon Launcher"),
+              },
+
+              r"Software\\Classes\\nxl\\shell\\open\\command": {
+                  None: (
+                      "str",
+                      r'"C:\Nexon\Launcher\nexon_launcher.exe" "%1"',
+                  ),
+              },
+
+              r"Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nexon Nexon Launcher": {
+                  "DisplayIcon": (
+                      "str",
+                      r'"C:\Nexon\Launcher\logo.ico"',
+                  ),
+                  "DisplayName": (
+                      "str",
+                      "Nexon Launcher",
+                  ),
+                  "DisplayVersion": (
+                      "str",
+                      "2.3.0",
+                  ),
+                  "EstimatedSize": (
+                      "dword",
+                      0x2B48,
+                  ),
+                  "HelpLink": (
+                      "str",
+                      r'"http://www.nexon.net/legal/terms-of-use/"',
+                  ),
+                  "InstallLocation": (
+                      "str",
+                      r'"C:\Nexon\Launcher"',
+                  ),
+                  "NoModify": (
+                      "dword",
+                      1,
+                  ),
+                  "NoRepair": (
+                      "dword",
+                      1,
+                  ),
+                  "Publisher": (
+                      "str",
+                      "Nexon",
+                  ),
+                  "QuietUninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe" /S',
+                  ),
+                  "UninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe"',
+                  ),
+                  "URLInfoAbout": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "URLUpdateInfo": (
+                      "str",
+                      r'"http://www.nexon.net"',
+                  ),
+                  "VersionMajor": (
+                      "dword",
+                      2,
+                  ),
+                  "VersionMinor": (
+                      "dword",
+                      3,
+                  ),
+              },
+          }
+
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+
+          def find_section(lines, section):
+              for index, line in enumerate(lines):
+                  match = section_re.match(line)
+
+                  if match and match.group(1) == section:
+                      start = index
+
+                      end = len(lines)
+
+                      for next_index in range(index + 1, len(lines)):
+                          if section_re.match(lines[next_index]):
+                              end = next_index
+                              break
+
+                      return start, end
+
+              return None
+
+
+          def patch_hive(path, patches):
+              print(f"Patching {path}")
+
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              lines = text.splitlines()
+
+              for section, values in patches.items():
+
+                  current = find_section(lines, section)
+
+                  if current is None:
+                      if lines and lines[-1] != "":
+                          lines.append("")
+
+                      # Modification time is optional in Wine registry v2.
+                      lines.append(f"[{section}]")
+
+                      for name, (kind, value) in values.items():
+                          lines.append(
+                              render(
+                                  name,
+                                  kind,
+                                  value,
+                              )
+                          )
+
+                      continue
+
+                  for name, (kind, value) in values.items():
+
+                      desired = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      token = value_name(name) + "="
+
+                      start, end = find_section(
+                          lines,
+                          section,
+                      )
+
+                      replaced = False
+
+                      for line_index in range(
+                          start + 1,
+                          end,
+                      ):
+                          if lines[line_index].startswith(token):
+                              lines[line_index] = desired
+                              replaced = True
+                              break
+
+                      if not replaced:
+                          lines.insert(
+                              end,
+                              desired,
+                          )
+
+              path.write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8",
+              )
+
+
+          def verify_hive(path, patches):
+              text = path.read_text(
+                  encoding="utf-8",
+                  errors="strict",
+              )
+
+              for section, values in patches.items():
+
+                  if f"[{section}]" not in text:
+                      # Existing Wine-generated sections may include
+                      # modification timestamps after the closing bracket.
+                      section_found = False
+
+                      for line in text.splitlines():
+                          match = section_re.match(line)
+
+                          if match and match.group(1) == section:
+                              section_found = True
+                              break
+
+                      if not section_found:
+                          raise RuntimeError(
+                              f"Missing registry section {section} in {path}"
+                          )
+
+                  for name, (kind, value) in values.items():
+                      wanted = render(
+                          name,
+                          kind,
+                          value,
+                      )
+
+                      if wanted not in text:
+                          raise RuntimeError(
+                              f"Missing registry value {wanted} in {path}"
+                          )
+
+              print(f"Verified {path}")
+
+
+          patch_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          patch_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          # Keep default-user settings consistent if this hive exists.
+          if userdef_reg and userdef_reg.exists():
+              patch_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          verify_hive(
+              user_reg,
+              USER_PATCHES,
+          )
+
+          verify_hive(
+              system_reg,
+              SYSTEM_PATCHES,
+          )
+
+          if userdef_reg and userdef_reg.exists():
+              verify_hive(
+                  userdef_reg,
+                  USER_PATCHES,
+              )
+
+          print()
+          print("MapleStory registry patch validation PASSED")
+          PY
+
+          echo
+          echo "=== Repacking modified prefix ==="
+
+          tar cJf prefixPack.txz \
+            -C prefix_work \
+            .
+
+          test -s prefixPack.txz
+
+          echo
+          echo "=== Modified prefix pack ==="
+
+          ls -lh prefixPack.txz
+          sha256sum prefixPack.txz
+
+          echo
+          echo "=== Modified prefix contents ==="
+
+          tar tJf prefixPack.txz \
+            > modified-prefix-files.txt
+
+          grep -E \
+            '(^|/)(user|userdef|system)\.reg$' \
+            modified-prefix-files.txt
+
+          echo
+          echo "Prefix registry patch PASSED"
+
+      # ============================================================
+      # 7. ADD ONLY vcruntime140_threads.dll TO THE PACKAGED PREFIX
+      #
+      # Known-good 1.6 runtime variable:
+      #   - system32/vcruntime140_threads.dll
+      #   - syswow64/vcruntime140_threads.dll
+      #
+      # We deliberately do NOT replace ucrtbase.dll or the rest of the
+      # VC runtime set yet. Earlier MapleStory logs already showed several
+      # v14 runtime DLLs loading, while vcruntime140_threads.dll was not
+      # observed. This keeps the experiment narrow and reversible.
+      # ============================================================
+
+      - name: Add vcruntime140_threads.dll to packaged prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+
+          rm -rf prefix_runtime_work
+          mkdir -p prefix_runtime_work
+
+          tar -xJf prefixPack.txz \
+            -C prefix_runtime_work
+
+          DRIVE_C="$(find prefix_runtime_work -type d -name drive_c -print -quit)"
+
+          if [ -z "$DRIVE_C" ]; then
+            echo "ERROR: drive_c not found in prefix pack"
+            exit 1
+          fi
+
+          mkdir -p \
+            "$DRIVE_C/windows/system32" \
+            "$DRIVE_C/windows/syswow64"
+
+          cp -f \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cp -f \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          tar cJf prefixPack.txz \
+            -C prefix_runtime_work \
+            .
+
+          test -s prefixPack.txz
+
+          echo
+          echo "Packaged-prefix vcruntime140_threads.dll injection PASSED"
+
+      # ============================================================
+      # 8. STAGE REGISTRY-ONLY RECOVERY FOR THE EXISTING LIVE PREFIX
+      #
+      # The failed 1.7 nested regedit may have persisted some/all of the
+      # ten VC runtime native,builtin overrides into the existing user.reg.
+      # 2.0 restored the runtime files before its guest-side cmp failure,
+      # but its wine.inf registry recovery never got a chance to run.
+      #
+      # 2.2 therefore changes ONLY those ten values in the live
+      # Software\\Wine\\DllOverrides section. It derives their exact
+      # baseline from untouched prefixPack-arm64ec-11.txz at build time.
+      #
+      # IMPORTANT:
+      #   - No nested Wine/regedit invocation.
+      #   - No wine.inf mutation.
+      #   - No WINEDLLOVERRIDES.
+      #   - No live VC runtime copying.
+      #   - No esync / DXVK / Turnip changes.
+      #   - Recovery intentionally also runs for TestD3D.
+      # ============================================================
+
+      - name: Stage 2.2 live-prefix VC DllOverrides recovery
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+          RECOVERY_ROOT="$ROOT/share/wine/maplestory_registry_recovery_2_2"
+
+          test -x "$ROOT/lib/wine/aarch64-unix/wine"
+
+          rm -rf recovery_registry_base "$RECOVERY_ROOT"
+          mkdir -p recovery_registry_base "$RECOVERY_ROOT"
+
+          tar -xJf prefixPack-base.txz \
+            -C recovery_registry_base
+
+          BASE_USER_REG="$(find recovery_registry_base -type f -name user.reg -print -quit)"
+          test -n "$BASE_USER_REG"
+          test -s "$BASE_USER_REG"
+
+          # Extract only the ten values that 1.7 attempted to force.
+          # baseline-values.txt contains the exact raw Wine-registry lines
+          # present upstream; omitted values are intentionally absent.
+          python3 - \
+            "$BASE_USER_REG" \
+            "$RECOVERY_ROOT/baseline-values.txt" \
+            "$RECOVERY_ROOT/baseline-status.txt" <<'PYBASE'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          values_out = Path(sys.argv[2])
+          status_out = Path(sys.argv[3])
+
+          section = r"Software\\Wine\\DllOverrides"
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          target_set = set(targets)
+
+          lines = user_reg.read_text(encoding="utf-8", errors="strict").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+          value_re = re.compile(r'^"([^"]+)"=(.*)$')
+
+          in_section = False
+          found = {}
+
+          for line in lines:
+              match = section_re.match(line)
+              if match:
+                  in_section = match.group(1) == section
+                  continue
+
+              if not in_section:
+                  continue
+
+              match = value_re.match(line)
+              if not match:
+                  continue
+
+              name = match.group(1).lower()
+              if name not in target_set:
+                  continue
+
+              if name in found:
+                  raise RuntimeError(f"Duplicate upstream DllOverrides value: {name}")
+
+              found[name] = line
+
+          baseline_lines = [found[name] for name in targets if name in found]
+
+          values_out.write_text(
+              "\n".join(baseline_lines) + ("\n" if baseline_lines else ""),
+              encoding="utf-8",
+          )
+
+          status_lines = []
+          for name in targets:
+              if name in found:
+                  status_lines.append(f"present {name} {found[name]}")
+              else:
+                  status_lines.append(f"absent {name}")
+
+          status_out.write_text("\n".join(status_lines) + "\n", encoding="utf-8")
+
+          print("=== Upstream VC DllOverrides baseline ===")
+          print(status_out.read_text(encoding="utf-8"), end="")
+          PYBASE
+
+          test -f "$RECOVERY_ROOT/baseline-values.txt"
+          test -s "$RECOVERY_ROOT/baseline-status.txt"
+
+          cat > "$RECOVERY_ROOT/repair-user-reg.sh" <<'SHREPAIR'
+          #!/bin/sh
+          # Restore only the ten MapleStory VC runtime DllOverrides values in
+          # a Wine user.reg file. This intentionally uses simple POSIX shell
+          # operations available in GameNative's bionic guest.
+
+          USER_REG="$1"
+          BASELINE_VALUES="$2"
+
+          if [ -z "$USER_REG" ] || [ -z "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: repair helper missing arguments" >&2
+              exit 91
+          fi
+
+          if [ ! -f "$USER_REG" ]; then
+              echo "[GN-MS-2.2] ERROR: user.reg not found: $USER_REG" >&2
+              exit 92
+          fi
+
+          if [ ! -f "$BASELINE_VALUES" ]; then
+              echo "[GN-MS-2.2] ERROR: baseline-values.txt missing: $BASELINE_VALUES" >&2
+              exit 93
+          fi
+
+          TMP="${USER_REG}.gamenative-2.2.tmp"
+          rm -f "$TMP" || exit 94
+          : > "$TMP" || exit 94
+
+          IN_SECTION=0
+          SECTION_FOUND=0
+
+          while IFS= read -r LINE || [ -n "$LINE" ]; do
+              case "$LINE" in
+                  '[Software\\Wine\\DllOverrides]'*)
+                      printf '%s\n' "$LINE" >> "$TMP" || exit 94
+                      if [ -s "$BASELINE_VALUES" ]; then
+                          cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+                      fi
+                      IN_SECTION=1
+                      SECTION_FOUND=1
+                      continue
+                      ;;
+                  '['*)
+                      IN_SECTION=0
+                      ;;
+              esac
+
+              if [ "$IN_SECTION" -eq 1 ]; then
+                  case "$LINE" in
+                      \"[Cc][Oo][Nn][Cc][Rr][Tt]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_1\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_2\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Aa][Tt][Oo][Mm][Ii][Cc]_[Ww][Aa][Ii][Tt]\"=*|\
+                      \"[Mm][Ss][Vv][Cc][Pp]140_[Cc][Oo][Dd][Ee][Cc][Vv][Tt]_[Ii][Dd][Ss]\"=*|\
+                      \"[Uu][Cc][Rr][Tt][Bb][Aa][Ss][Ee]\"=*|\
+                      \"[Vv][Cc][Oo][Mm][Pp]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140\"=*|\
+                      \"[Vv][Cc][Rr][Uu][Nn][Tt][Ii][Mm][Ee]140_1\"=*)
+                          # Drop the live value. The exact upstream baseline
+                          # value (if one exists) was inserted at section start.
+                          continue
+                          ;;
+                  esac
+              fi
+
+              printf '%s\n' "$LINE" >> "$TMP" || exit 94
+          done < "$USER_REG"
+
+          # If the live hive had no DllOverrides section but upstream has one
+          # or more of our target values, append only those baseline values.
+          if [ "$SECTION_FOUND" -eq 0 ] && [ -s "$BASELINE_VALUES" ]; then
+              printf '\n[Software\\\\Wine\\\\DllOverrides]\n' >> "$TMP" || exit 94
+              cat "$BASELINE_VALUES" >> "$TMP" || exit 94
+          fi
+
+          # Preserve user.reg's existing inode/mode by truncating and rewriting
+          # the original file instead of replacing it with mv.
+          cat "$TMP" > "$USER_REG" || exit 95
+          rm -f "$TMP" || exit 95
+
+          exit 0
+          SHREPAIR
+
+          chmod 755 "$RECOVERY_ROOT/repair-user-reg.sh"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
+
+          # ----------------------------------------------------------
+          # Build-time simulation of the exact repair helper.
+          # Create a synthetic live user.reg with all ten 1.7 values forced
+          # to native,builtin plus an unrelated sentinel override, run the
+          # helper, then verify the ten values exactly match upstream and the
+          # sentinel survives.
+          # ----------------------------------------------------------
+
+          cp "$BASE_USER_REG" recovery-user-reg-test.reg
+
+          python3 - recovery-user-reg-test.reg <<'PYCONTAM'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          section = r"Software\\Wine\\DllOverrides"
+          forced = {
+              "concrt140": "native,builtin",
+              "msvcp140": "native,builtin",
+              "msvcp140_1": "native,builtin",
+              "msvcp140_2": "native,builtin",
+              "msvcp140_atomic_wait": "native,builtin",
+              "msvcp140_codecvt_ids": "native,builtin",
+              "ucrtbase": "native,builtin",
+              "vcomp140": "native,builtin",
+              "vcruntime140": "native,builtin",
+              "vcruntime140_1": "native,builtin",
+              "gamenative_2_2_sentinel": "builtin",
+          }
+
+          lines = path.read_text(encoding="utf-8").splitlines()
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+          start = None
+          end = None
+          for i, line in enumerate(lines):
+              m = section_re.match(line)
+              if m and m.group(1) == section:
+                  start = i
+                  end = len(lines)
+                  for j in range(i + 1, len(lines)):
+                      if section_re.match(lines[j]):
+                          end = j
+                          break
+                  break
+
+          entries = [f'"{name}"="{value}"' for name, value in forced.items()]
+
+          if start is None:
+              if lines and lines[-1] != "":
+                  lines.append("")
+              lines.append(f"[{section}]")
+              lines.extend(entries)
+          else:
+              target_names = {name.lower() for name in forced}
+              kept = []
+              for line in lines[start + 1:end]:
+                  m = re.match(r'^"([^"]+)"=', line)
+                  if m and m.group(1).lower() in target_names:
+                      continue
+                  kept.append(line)
+              lines[start + 1:end] = entries + kept
+
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PYCONTAM
+
+          "$RECOVERY_ROOT/repair-user-reg.sh" \
+            recovery-user-reg-test.reg \
+            "$RECOVERY_ROOT/baseline-values.txt"
+
+          python3 - \
+            "$BASE_USER_REG" \
+            recovery-user-reg-test.reg <<'PYVERIFY'
+          import re
+          import sys
+          from pathlib import Path
+
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+          section = r"Software\\Wine\\DllOverrides"
+
+          def read_values(path):
+              lines = Path(path).read_text(encoding="utf-8").splitlines()
+              section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+              value_re = re.compile(r'^"([^"]+)"=(.*)$')
+              in_section = False
+              values = {}
+              for line in lines:
+                  m = section_re.match(line)
+                  if m:
+                      in_section = m.group(1) == section
+                      continue
+                  if not in_section:
+                      continue
+                  m = value_re.match(line)
+                  if m:
+                      values[m.group(1).lower()] = line
+              return values
+
+          base = read_values(sys.argv[1])
+          repaired = read_values(sys.argv[2])
+
+          for name in targets:
+              if base.get(name) != repaired.get(name):
+                  raise RuntimeError(
+                      f"Repair mismatch for {name}: upstream={base.get(name)!r} repaired={repaired.get(name)!r}"
+                  )
+
+          sentinel = repaired.get("gamenative_2_2_sentinel")
+          if sentinel != '"gamenative_2_2_sentinel"="builtin"':
+              raise RuntimeError(f"Unrelated sentinel was not preserved: {sentinel!r}")
+
+          print("Synthetic live-user.reg recovery simulation PASSED")
+          PYVERIFY
+
+          # Preserve the original Wine launcher as wine.real and install the
+          # thin one-time live-registry recovery wrapper.
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/aarch64-unix/wine"
+
+          rm -f "$ROOT/bin/wine.real"
+          ln -s ../lib/wine/aarch64-unix/wine "$ROOT/bin/wine.real"
+          rm -f "$ROOT/bin/wine"
+
+          cat > "$ROOT/bin/wine" <<'SHWRAP'
+          #!/bin/sh
+          # GameNative MapleStory 216150 registry-only recovery shim (2.2).
+          # Repair the ten VC DllOverrides values potentially persisted by the
+          # failed 1.7 regedit attempt, then immediately launch the real Wine.
+
+          # Do not use command substitution. GameNative's LD_PRELOAD evshim
+          # writes startup messages to stdout and can corrupt captured output.
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-2.2] ERROR: Wine wrapper was invoked without a path: $0" >&2
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          ROOT_DIR="${SCRIPT_DIR%/*}"
+          REAL_WINE="$SCRIPT_DIR/wine.real"
+          RECOVERY_ROOT="$ROOT_DIR/share/wine/maplestory_registry_recovery_2_2"
+          REPAIR_SCRIPT="$RECOVERY_ROOT/repair-user-reg.sh"
+          BASELINE_VALUES="$RECOVERY_ROOT/baseline-values.txt"
+
+          if [ ! -x "$REAL_WINE" ]; then
+              echo "[GN-MS-2.2] ERROR: real Wine launcher missing: $REAL_WINE" >&2
+              exit 52
+          fi
+
+          PREFIX="${WINEPREFIX:-}"
+
+          if [ -n "$PREFIX" ]; then
+              USER_REG="$PREFIX/user.reg"
+              MARKER="$PREFIX/.gamenative-maplestory-dlloverrides-recovery-2.2"
+
+              if [ -f "$USER_REG" ]; then
+                  if [ ! -f "$MARKER" ]; then
+                      if [ ! -x "$REPAIR_SCRIPT" ] || [ ! -f "$BASELINE_VALUES" ]; then
+                          echo "[GN-MS-2.2] ERROR: packaged registry recovery payload missing" >&2
+                          exit 90
+                      fi
+
+                      echo "[GN-MS-2.2] Restoring VC DllOverrides baseline in $USER_REG" >&2
+
+                      "$REPAIR_SCRIPT" "$USER_REG" "$BASELINE_VALUES" || exit $?
+
+                      {
+                          echo "GameNative MapleStory VC DllOverrides recovery 2.2"
+                          echo "Recovered=concrt140,msvcp140,msvcp140_1,msvcp140_2,msvcp140_atomic_wait,msvcp140_codecvt_ids,ucrtbase,vcomp140,vcruntime140,vcruntime140_1"
+                          echo "Source=untouched prefixPack-arm64ec-11.txz baseline"
+                          echo "RuntimeFiles=unchanged by 2.2 live recovery"
+                          echo "WineInf=unchanged"
+                      } > "$MARKER" || exit 96
+
+                      echo "[GN-MS-2.2] Registry recovery complete; VC DllOverrides match Proton 11 baseline" >&2
+                  else
+                      echo "[GN-MS-2.2] Registry recovery marker already present" >&2
+                  fi
+              else
+                  # A genuinely new prefix will use the already-patched
+                  # prefixPack.txz; do not block Wine initialization.
+                  echo "[GN-MS-2.2] user.reg not ready; deferring live registry recovery" >&2
+              fi
+          fi
+
+          exec "$REAL_WINE" "$@"
+          SHWRAP
+
+          chmod 755 "$ROOT/bin/wine"
+
+          echo
+          echo "=== Validate 2.2 registry recovery wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -L "$ROOT/bin/wine.real"
+          test -e "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+          test "$(readlink "$ROOT/bin/wine.real")" = "../lib/wine/aarch64-unix/wine"
+
+          sh -n "$ROOT/bin/wine"
+          sh -n "$RECOVERY_ROOT/repair-user-reg.sh"
+
+          grep -Fq 'Restoring VC DllOverrides baseline' "$ROOT/bin/wine"
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' "$ROOT/bin/wine"
+          grep -Fq 'repair-user-reg.sh' "$ROOT/bin/wine"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$ROOT/bin/wine"
+
+          if grep -Fq 'TestD3D.exe' "$ROOT/bin/wine"; then
+              echo "ERROR: 2.2 must not bypass registry recovery for TestD3D"
+              exit 1
+          fi
+
+          if grep -Fq 'WINEDLLOVERRIDES' "$ROOT/bin/wine"; then
+              echo "ERROR: WINEDLLOVERRIDES leaked into 2.2"
+              exit 1
+          fi
+
+          if grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
+              echo "ERROR: nested regedit leaked into 2.2"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$ROOT/bin/wine"; then
+              echo "ERROR: guest wrapper depends on cmp"
+              exit 1
+          fi
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" || \
+             grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: wrapper contains stdout-capturing path command substitution"
+              exit 1
+          fi
+
+          echo
+          echo "2.2 live-prefix registry-only recovery wrapper PASSED"
+
+      # ============================================================
+      # 9. STAGE 3.7 MAPLESTORY HOT-EXIT DIAGNOSTICS
+      #
+      # Observation-only follow-up to 3.2.
+      #
+      # 3.2 proved the compatibility behavior did not change, but its
+      # Earlier process-name filters produced no usable lifecycle records. 3.7 keeps
+      # only the observer:
+      #
+      # - logs to stdout so GameNative's System.out capture sees it
+      # - emits a heartbeat every 2 seconds so watcher liveness is provable
+      # - reads /proc/<pid>/exe, comm, cmdline, status, and stat
+      # - tracks all Wine/Box64-looking host processes
+      # - also tracks descendants of those processes, even when the child
+      #   itself has a generic host-side name
+      # - polls every 50 ms and logs only appearance/disappearance events
+      #
+      # NO Wine compatibility setting is changed:
+      # - no WINEDEBUG
+      # - no WINEESYNC change
+      # - no WINEDLLOVERRIDES
+      # - no registry/runtime/prefix change beyond the proven 2.2 layer
+      # - no DXVK/Turnip/graphics change
+      # - TestD3D remains untouched
+      # ============================================================
+
+      - name: Stage 3.7 MapleStory hot-exit diagnostic wrapper
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+          DIAG_ROOT="$ROOT/share/wine/maplestory_diag_3_7"
+          INNER_WINE="$ROOT/bin/wine.2.2-registry"
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -L "$ROOT/bin/wine.real"
+          test -e "$ROOT/bin/wine.real"
+          test -x "$ROOT/bin/wine.real"
+
+          # 3.6 keeps the proven Android/bionic watcher path from 3.5.
+          # The only diagnostic addition is /proc/<pid>/stat field 52 capture
+          # so a zombie's raw wait status can be decoded as normal exit versus
+          # SIGSEGV/SIGABRT/SIGKILL/etc.
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" ]; then
+              NDK=""
+              if [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
+                  NDK="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -n 1)"
+              fi
+          fi
+
+          if [ -z "$NDK" ] || [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" ]; then
+              echo "No suitable Android NDK found on runner; installing NDK r27d..."
+              SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+              test -x "$SDKMANAGER"
+              "$SDKMANAGER" "ndk;27.3.13750724"
+              NDK="$ANDROID_SDK_ROOT/ndk/27.3.13750724"
+          fi
+
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+          test -x "$CC"
+
+          rm -rf "$DIAG_ROOT"
+          mkdir -p "$DIAG_ROOT"
+
+          cat > "$GITHUB_WORKSPACE/mswatch-3.7.c" <<'CWATCH'
+          #define _GNU_SOURCE
+          #include <ctype.h>
+          #include <dirent.h>
+          #include <errno.h>
+          #include <signal.h>
+          #include <pthread.h>
+          #include <stdarg.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/types.h>
+          #include <time.h>
+          #include <unistd.h>
+
+          #define MAX_PROCS 2048
+          #define MAX_TRACKED 768
+          #define COMM_LEN 128
+          #define CMD_LEN 1024
+          #define EXE_LEN 512
+          #define STATE_LEN 32
+
+          struct proc_info {
+              pid_t pid;
+              pid_t ppid;
+              int relevant;
+              char comm[COMM_LEN];
+              char cmd[CMD_LEN];
+              char exe[EXE_LEN];
+              char state[STATE_LEN];
+              unsigned long long start_ticks;
+              long long raw_exit_status;
+          };
+
+          struct tracked_proc {
+              pid_t pid;
+              pid_t ppid;
+              int seen;
+              unsigned long long first_ms;
+              unsigned long long start_ticks;
+              long long raw_exit_status;
+              int zombie_reported;
+              char comm[COMM_LEN];
+              char cmd[CMD_LEN];
+              char exe[EXE_LEN];
+              char state[STATE_LEN];
+          };
+
+          static struct tracked_proc tracked[MAX_TRACKED];
+          static int tracked_count = 0;
+          static unsigned long long start_ms = 0;
+          static unsigned long long last_heartbeat_ms = 0;
+          static unsigned long long scans = 0;
+          static unsigned long long events = 0;
+          static FILE *diag_file = NULL;
+
+          #define MAX_MAPLE_MONITORS 16
+
+          struct maple_monitor_key {
+              pid_t pid;
+              unsigned long long start_ticks;
+          };
+
+          struct maple_monitor_ctx {
+              pid_t pid;
+              unsigned long long start_ticks;
+              unsigned long long detected_ms;
+          };
+
+          static struct maple_monitor_key maple_monitors[MAX_MAPLE_MONITORS];
+          static int maple_monitor_count = 0;
+          static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+          static pthread_mutex_t monitor_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+          static unsigned long long monotonic_ms(void) {
+              struct timespec ts;
+              if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+              return (unsigned long long)ts.tv_sec * 1000ULL +
+                     (unsigned long long)ts.tv_nsec / 1000000ULL;
+          }
+
+          static unsigned long long monotonic_us(void) {
+              struct timespec ts;
+              if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+              return (unsigned long long)ts.tv_sec * 1000000ULL +
+                     (unsigned long long)ts.tv_nsec / 1000ULL;
+          }
+
+          static void vlog_one(FILE *f, const char *fmt, va_list ap) {
+              if (!f) return;
+              fputs("[GN-MS-3.7] ", f);
+              vfprintf(f, fmt, ap);
+              fputc('\n', f);
+              fflush(f);
+          }
+
+          static void log_line(const char *fmt, ...) {
+              va_list ap;
+              va_list copy;
+
+              pthread_mutex_lock(&log_mutex);
+
+              va_start(ap, fmt);
+              va_copy(copy, ap);
+              vlog_one(stdout, fmt, ap);
+              va_end(ap);
+              if (diag_file) {
+                  vlog_one(diag_file, fmt, copy);
+              }
+              va_end(copy);
+
+              pthread_mutex_unlock(&log_mutex);
+          }
+
+          static int numeric_name(const char *s) {
+              if (!s || !*s) return 0;
+              for (; *s; ++s) {
+                  if (!isdigit((unsigned char)*s)) return 0;
+              }
+              return 1;
+          }
+
+          static int read_file(const char *path, char *buf, size_t cap, int nul_to_space) {
+              FILE *f = fopen(path, "rb");
+              size_t n;
+              if (!f || cap == 0) {
+                  if (f) fclose(f);
+                  return -1;
+              }
+              n = fread(buf, 1, cap - 1, f);
+              fclose(f);
+
+              if (nul_to_space) {
+                  for (size_t i = 0; i < n; ++i) {
+                      if (buf[i] == '\0' || buf[i] == '\n' || buf[i] == '\r')
+                          buf[i] = ' ';
+                  }
+                  while (n && buf[n - 1] == ' ') --n;
+              } else {
+                  while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) --n;
+              }
+
+              buf[n] = '\0';
+              return (int)n;
+          }
+
+          static int read_link(const char *path, char *buf, size_t cap) {
+              ssize_t n;
+              if (!cap) return -1;
+              n = readlink(path, buf, cap - 1);
+              if (n < 0) {
+                  buf[0] = '\0';
+                  return -1;
+              }
+              buf[n] = '\0';
+              return (int)n;
+          }
+
+          static void lower_copy(char *dst, size_t cap, const char *src) {
+              size_t i = 0;
+              if (!cap) return;
+              while (src && src[i] && i + 1 < cap) {
+                  dst[i] = (char)tolower((unsigned char)src[i]);
+                  ++i;
+              }
+              dst[i] = '\0';
+          }
+
+          static int contains_any(const char *comm, const char *cmd, const char *exe) {
+              static const char *needles[] = {
+                  "wine",
+                  "wineserver",
+                  "wine-preloader",
+                  "box64",
+                  "wow64",
+                  "explorer.exe",
+                  "services.exe",
+                  "plugplay.exe",
+                  "rpcss.exe",
+                  "svchost.exe",
+                  "conhost.exe",
+                  "start.exe",
+                  "winhandler.exe",
+                  "steam.exe",
+                  "nxsteam.exe",
+                  "maplestory.exe",
+                  "blackxchg.aes",
+                  "blackcipher",
+                  "blackcall",
+                  "ngservice",
+                  "nexon",
+                  "nmconew",
+                  "nugu64",
+                  NULL
+              };
+              char lc_comm[COMM_LEN];
+              char lc_cmd[CMD_LEN];
+              char lc_exe[EXE_LEN];
+
+              lower_copy(lc_comm, sizeof(lc_comm), comm);
+              lower_copy(lc_cmd, sizeof(lc_cmd), cmd);
+              lower_copy(lc_exe, sizeof(lc_exe), exe);
+
+              for (int i = 0; needles[i]; ++i) {
+                  if (strstr(lc_comm, needles[i]) ||
+                      strstr(lc_cmd, needles[i]) ||
+                      strstr(lc_exe, needles[i]))
+                      return 1;
+              }
+              return 0;
+          }
+
+          static void read_status(pid_t pid, pid_t *ppid, char *state, size_t state_cap) {
+              char path[64];
+              char line[256];
+              FILE *f;
+
+              *ppid = -1;
+              if (state_cap) state[0] = '\0';
+              snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+              f = fopen(path, "r");
+              if (!f) return;
+
+              while (fgets(line, sizeof(line), f)) {
+                  if (strncmp(line, "PPid:", 5) == 0) {
+                      *ppid = (pid_t)strtol(line + 5, NULL, 10);
+                  } else if (strncmp(line, "State:", 6) == 0 && state_cap) {
+                      char *p = line + 6;
+                      while (*p == ' ' || *p == '\t') ++p;
+                      size_t n = strcspn(p, "\r\n");
+                      if (n >= state_cap) n = state_cap - 1;
+                      memcpy(state, p, n);
+                      state[n] = '\0';
+                  }
+              }
+              fclose(f);
+          }
+
+          /*
+           * /proc/<pid>/stat field 22 = starttime
+           * /proc/<pid>/stat field 52 = exit_code
+           *
+           * Linux documents field 52 as the process exit status in the
+           * same raw form reported by waitpid(2).  On a zombie this lets
+           * us distinguish a normal exit from host-side termination by
+           * SIGSEGV/SIGABRT/SIGKILL/etc.
+           */
+          static int read_proc_stat(pid_t pid,
+                                    unsigned long long *start_ticks,
+                                    long long *raw_exit_status,
+                                    char *proc_state) {
+              char path[64];
+              char buf[8192];
+              FILE *f;
+              size_t n;
+              char *rp;
+              char *p;
+              int field = 3;
+              int got_start = 0;
+              int got_exit = 0;
+              int got_state = 0;
+
+              if (start_ticks) *start_ticks = 0;
+              if (raw_exit_status) *raw_exit_status = -1;
+              if (proc_state) *proc_state = '\0';
+
+              snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+              f = fopen(path, "r");
+              if (!f) return -1;
+
+              n = fread(buf, 1, sizeof(buf) - 1, f);
+              fclose(f);
+              if (!n) return -1;
+              buf[n] = '\0';
+
+              /*
+               * comm (field 2) is parenthesized and may contain spaces, so
+               * begin tokenizing immediately after its final ')'.
+               */
+              rp = strrchr(buf, ')');
+              if (!rp || rp[1] != ' ') return -1;
+              p = rp + 2;
+
+              while (*p && field <= 52) {
+                  char *end = p;
+                  char saved;
+
+                  while (*end && *end != ' ') ++end;
+                  saved = *end;
+                  *end = '\0';
+
+                  if (field == 3 && proc_state && *p) {
+                      *proc_state = *p;
+                      got_state = 1;
+                  } else if (field == 22 && start_ticks) {
+                      *start_ticks = strtoull(p, NULL, 10);
+                      got_start = 1;
+                  } else if (field == 52 && raw_exit_status) {
+                      *raw_exit_status = strtoll(p, NULL, 10);
+                      got_exit = 1;
+                  }
+
+                  *end = saved;
+                  while (*end == ' ') ++end;
+                  p = end;
+                  ++field;
+              }
+
+              return (got_start || got_exit || got_state) ? 0 : -1;
+          }
+
+          static const char *signal_name_short(int sig) {
+              switch (sig) {
+                  case 1:  return "SIGHUP";
+                  case 2:  return "SIGINT";
+                  case 3:  return "SIGQUIT";
+                  case 4:  return "SIGILL";
+                  case 5:  return "SIGTRAP";
+                  case 6:  return "SIGABRT";
+                  case 7:  return "SIGBUS";
+                  case 8:  return "SIGFPE";
+                  case 9:  return "SIGKILL";
+                  case 10: return "SIGUSR1";
+                  case 11: return "SIGSEGV";
+                  case 12: return "SIGUSR2";
+                  case 13: return "SIGPIPE";
+                  case 14: return "SIGALRM";
+                  case 15: return "SIGTERM";
+                  case 16: return "SIGSTKFLT";
+                  case 17: return "SIGCHLD";
+                  case 18: return "SIGCONT";
+                  case 19: return "SIGSTOP";
+                  case 20: return "SIGTSTP";
+                  case 21: return "SIGTTIN";
+                  case 22: return "SIGTTOU";
+                  case 24: return "SIGXCPU";
+                  case 25: return "SIGXFSZ";
+                  case 31: return "SIGSYS";
+                  default: return "SIGNAL";
+              }
+          }
+
+          static void decode_wait_status(long long raw, char *buf, size_t cap) {
+              unsigned int status;
+              unsigned int sig;
+
+              if (!buf || cap == 0) return;
+
+              if (raw < 0) {
+                  snprintf(buf, cap, "unavailable");
+                  return;
+              }
+
+              status = (unsigned int)raw;
+              sig = status & 0x7fU;
+
+              if (sig == 0) {
+                  snprintf(buf, cap, "normal-exit code=%u",
+                           (status >> 8) & 0xffU);
+              } else if (sig == 0x7fU) {
+                  snprintf(buf, cap, "stopped signal=%u(%s)",
+                           (status >> 8) & 0xffU,
+                           signal_name_short((status >> 8) & 0xffU));
+              } else {
+                  snprintf(buf, cap, "signaled signal=%u(%s) core=%u",
+                           sig,
+                           signal_name_short((int)sig),
+                           (status & 0x80U) ? 1U : 0U);
+              }
+          }
+
+          static int maplestory_identity(const char *comm, const char *cmd) {
+              char lc_comm[COMM_LEN];
+              char lc_cmd[CMD_LEN];
+
+              lower_copy(lc_comm, sizeof(lc_comm), comm);
+              lower_copy(lc_cmd, sizeof(lc_cmd), cmd);
+
+              return strstr(lc_comm, "maplestory.exe") != NULL ||
+                     strstr(lc_cmd, "maplestory.exe") != NULL;
+          }
+
+          static void *maple_exit_monitor_thread(void *opaque) {
+              struct maple_monitor_ctx *ctx = (struct maple_monitor_ctx *)opaque;
+              pid_t pid = ctx->pid;
+              unsigned long long expected_start = ctx->start_ticks;
+              unsigned long long monitor_start_us = monotonic_us();
+              unsigned long long arm_us = 0;
+              unsigned long long normal_samples = 0;
+              unsigned long long hot_samples = 0;
+              struct timespec normal_delay = {0, 1000 * 1000}; /* 1 ms */
+              char exe_path[64];
+              char exe_buf[EXE_LEN];
+
+              snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", (int)pid);
+
+              log_line("MAPLE-MONITOR START pid=%d start=%llu detected_t=%llums normal_poll=1ms hot_poll=busy",
+                       (int)pid,
+                       expected_start,
+                       ctx->detected_ms);
+
+              free(ctx);
+
+              for (;;) {
+                  unsigned long long start_ticks = 0;
+                  long long raw_exit_status = -1;
+                  char state = '\0';
+                  int stat_rc;
+
+                  ++normal_samples;
+                  stat_rc = read_proc_stat(pid, &start_ticks, &raw_exit_status, &state);
+
+                  if (stat_rc < 0) {
+                      log_line("MAPLE-MONITOR GONE-BEFORE-ARM pid=%d start=%llu normal_samples=%llu elapsed_us=%llu",
+                               (int)pid,
+                               expected_start,
+                               normal_samples,
+                               monotonic_us() - monitor_start_us);
+                      return NULL;
+                  }
+
+                  if (start_ticks != expected_start) {
+                      log_line("MAPLE-MONITOR PID-REUSED pid=%d expected_start=%llu observed_start=%llu",
+                               (int)pid, expected_start, start_ticks);
+                      return NULL;
+                  }
+
+                  if (state == 'Z') {
+                      char decoded[128];
+                      decode_wait_status(raw_exit_status, decoded, sizeof(decoded));
+                      log_line("MAPLE-HOT-ZOMBIE pid=%d start=%llu trigger=direct state=Z raw_wait_status=%lld decoded=\"%s\" normal_samples=%llu elapsed_us=%llu",
+                               (int)pid,
+                               expected_start,
+                               raw_exit_status,
+                               decoded,
+                               normal_samples,
+                               monotonic_us() - monitor_start_us);
+                      return NULL;
+                  }
+
+                  /*
+                   * 3.6 observed the real MapleStory process lose /proc/PID/exe
+                   * roughly one scan before it was reaped.  That is our early
+                   * warning.  Once this link disappears, stop sleeping and
+                   * hammer only /proc/PID/stat until Z is observed or the PID
+                   * is gone.  This avoids the expensive whole-/proc scan race.
+                   */
+                  if (read_link(exe_path, exe_buf, sizeof(exe_buf)) < 0) {
+                      arm_us = monotonic_us();
+                      log_line("MAPLE-HOT-ARM pid=%d start=%llu state=%c raw_wait_status=%lld normal_samples=%llu elapsed_us=%llu reason=exe-unavailable",
+                               (int)pid,
+                               expected_start,
+                               state ? state : '?',
+                               raw_exit_status,
+                               normal_samples,
+                               arm_us - monitor_start_us);
+
+                      for (;;) {
+                          unsigned long long hot_start_ticks = 0;
+                          long long hot_raw = -1;
+                          char hot_state = '\0';
+                          int hot_rc;
+
+                          ++hot_samples;
+                          hot_rc = read_proc_stat(pid, &hot_start_ticks, &hot_raw, &hot_state);
+
+                          if (hot_rc < 0) {
+                              log_line("MAPLE-HOT-GONE pid=%d start=%llu hot_samples=%llu arm_elapsed_us=%llu total_elapsed_us=%llu result=zombie-not-observed",
+                                       (int)pid,
+                                       expected_start,
+                                       hot_samples,
+                                       monotonic_us() - arm_us,
+                                       monotonic_us() - monitor_start_us);
+                              return NULL;
+                          }
+
+                          if (hot_start_ticks != expected_start) {
+                              log_line("MAPLE-HOT-PID-REUSED pid=%d expected_start=%llu observed_start=%llu hot_samples=%llu",
+                                       (int)pid,
+                                       expected_start,
+                                       hot_start_ticks,
+                                       hot_samples);
+                              return NULL;
+                          }
+
+                          if (hot_state == 'Z') {
+                              char decoded[128];
+                              decode_wait_status(hot_raw, decoded, sizeof(decoded));
+                              log_line("MAPLE-HOT-ZOMBIE pid=%d start=%llu trigger=exe-unavailable state=Z raw_wait_status=%lld decoded=\"%s\" hot_samples=%llu arm_to_zombie_us=%llu total_elapsed_us=%llu",
+                                       (int)pid,
+                                       expected_start,
+                                       hot_raw,
+                                       decoded,
+                                       hot_samples,
+                                       monotonic_us() - arm_us,
+                                       monotonic_us() - monitor_start_us);
+                              return NULL;
+                          }
+
+                          /*
+                           * The 3.6 warning window was ~71 ms.  Give the hot
+                           * loop a 500 ms ceiling so a transient readlink
+                           * failure cannot burn CPU indefinitely.
+                           */
+                          if (monotonic_us() - arm_us >= 500000ULL) {
+                              log_line("MAPLE-HOT-TIMEOUT pid=%d start=%llu last_state=%c raw_wait_status=%lld hot_samples=%llu",
+                                       (int)pid,
+                                       expected_start,
+                                       hot_state ? hot_state : '?',
+                                       hot_raw,
+                                       hot_samples);
+                              break;
+                          }
+                      }
+                  }
+
+                  if (monotonic_us() - monitor_start_us >= 120000000ULL) {
+                      log_line("MAPLE-MONITOR TIMEOUT pid=%d start=%llu normal_samples=%llu elapsed_us=%llu",
+                               (int)pid,
+                               expected_start,
+                               normal_samples,
+                               monotonic_us() - monitor_start_us);
+                      return NULL;
+                  }
+
+                  nanosleep(&normal_delay, NULL);
+              }
+          }
+
+          static void maybe_start_maple_monitor(const struct proc_info *p) {
+              pthread_t thread;
+              struct maple_monitor_ctx *ctx;
+              int seen = 0;
+
+              if (!p) return;
+              if (p->pid <= 1 || p->ppid != 1) return;
+              if (!p->exe[0]) return;
+              if (!maplestory_identity(p->comm, p->cmd)) return;
+              if (!p->start_ticks) return;
+
+              pthread_mutex_lock(&monitor_mutex);
+              for (int i = 0; i < maple_monitor_count; ++i) {
+                  if (maple_monitors[i].pid == p->pid &&
+                      maple_monitors[i].start_ticks == p->start_ticks) {
+                      seen = 1;
+                      break;
+                  }
+              }
+
+              if (!seen && maple_monitor_count < MAX_MAPLE_MONITORS) {
+                  maple_monitors[maple_monitor_count].pid = p->pid;
+                  maple_monitors[maple_monitor_count].start_ticks = p->start_ticks;
+                  ++maple_monitor_count;
+              }
+              pthread_mutex_unlock(&monitor_mutex);
+
+              if (seen) return;
+
+              if (maple_monitor_count > MAX_MAPLE_MONITORS) return;
+
+              ctx = (struct maple_monitor_ctx *)calloc(1, sizeof(*ctx));
+              if (!ctx) {
+                  log_line("MAPLE-MONITOR ERROR allocation failed pid=%d", (int)p->pid);
+                  return;
+              }
+
+              ctx->pid = p->pid;
+              ctx->start_ticks = p->start_ticks;
+              ctx->detected_ms = monotonic_ms() - start_ms;
+
+              if (pthread_create(&thread, NULL, maple_exit_monitor_thread, ctx) != 0) {
+                  log_line("MAPLE-MONITOR ERROR pthread_create failed pid=%d errno=%d",
+                           (int)p->pid, errno);
+                  free(ctx);
+                  return;
+              }
+
+              pthread_detach(thread);
+              log_line("MAPLE-MONITOR THREAD-CREATED pid=%d start=%llu",
+                       (int)p->pid, p->start_ticks);
+          }
+
+          static void report_zombie(struct tracked_proc *t,
+                                    long long raw_exit_status,
+                                    unsigned long long now) {
+              char decoded[128];
+
+              if (!t || t->zombie_reported) return;
+              decode_wait_status(raw_exit_status, decoded, sizeof(decoded));
+
+              log_line("ZOMBIE t=%llums pid=%d ppid=%d start=%llu lifetime=%llums raw_wait_status=%lld decoded=\"%s\" comm=%s exe=%s cmd=%s",
+                       now,
+                       (int)t->pid,
+                       (int)t->ppid,
+                       t->start_ticks,
+                       now >= t->first_ms ? now - t->first_ms : 0,
+                       raw_exit_status,
+                       decoded,
+                       t->comm[0] ? t->comm : "-",
+                       t->exe[0] ? t->exe : "-",
+                       t->cmd[0] ? t->cmd : "-");
+
+              t->zombie_reported = 1;
+              ++events;
+          }
+
+          static int find_proc(struct proc_info *procs, int count, pid_t pid) {
+              for (int i = 0; i < count; ++i) {
+                  if (procs[i].pid == pid) return i;
+              }
+              return -1;
+          }
+
+          static int find_tracked(pid_t pid, unsigned long long start_ticks) {
+              for (int i = 0; i < tracked_count; ++i) {
+                  if (tracked[i].pid == pid && tracked[i].start_ticks == start_ticks) return i;
+              }
+              return -1;
+          }
+
+          static void track_seen(const struct proc_info *p) {
+              int idx = find_tracked(p->pid, p->start_ticks);
+              unsigned long long now = monotonic_ms() - start_ms;
+
+              maybe_start_maple_monitor(p);
+
+              if (idx >= 0) {
+                  int state_changed = strcmp(tracked[idx].state, p->state) != 0;
+                  tracked[idx].seen = 1;
+                  tracked[idx].raw_exit_status = p->raw_exit_status;
+
+                  if (strcmp(tracked[idx].comm, p->comm) != 0 ||
+                      strcmp(tracked[idx].exe, p->exe) != 0 ||
+                      strcmp(tracked[idx].cmd, p->cmd) != 0) {
+                      log_line("PROC~ t=%llums pid=%d ppid=%d start=%llu old_comm=%s old_exe=%s new_comm=%s new_exe=%s new_cmd=%s",
+                               now,
+                               (int)p->pid,
+                               (int)p->ppid,
+                               p->start_ticks,
+                               tracked[idx].comm[0] ? tracked[idx].comm : "-",
+                               tracked[idx].exe[0] ? tracked[idx].exe : "-",
+                               p->comm[0] ? p->comm : "-",
+                               p->exe[0] ? p->exe : "-",
+                               p->cmd[0] ? p->cmd : "-");
+                      snprintf(tracked[idx].comm, sizeof(tracked[idx].comm), "%s", p->comm);
+                      snprintf(tracked[idx].cmd, sizeof(tracked[idx].cmd), "%s", p->cmd);
+                      snprintf(tracked[idx].exe, sizeof(tracked[idx].exe), "%s", p->exe);
+                      tracked[idx].ppid = p->ppid;
+                      ++events;
+                  }
+
+                  /*
+                   * 3.6 proved ordinary R/S/D transitions are extremely noisy
+                   * and add observer I/O.  3.7 logs state transitions only
+                   * when entering/leaving zombie state; the dedicated
+                   * MapleStory thread captures its exit independently.
+                   */
+                  if (state_changed &&
+                      (p->state[0] == 'Z' || tracked[idx].state[0] == 'Z')) {
+                      log_line("STATE~ t=%llums pid=%d ppid=%d start=%llu old_state=%s new_state=%s raw_wait_status=%lld",
+                               now,
+                               (int)p->pid,
+                               (int)p->ppid,
+                               p->start_ticks,
+                               tracked[idx].state[0] ? tracked[idx].state : "-",
+                               p->state[0] ? p->state : "-",
+                               p->raw_exit_status);
+                      ++events;
+                  }
+
+                  if (p->state[0])
+                      snprintf(tracked[idx].state, sizeof(tracked[idx].state), "%s", p->state);
+
+                  if (p->state[0] == 'Z')
+                      report_zombie(&tracked[idx], p->raw_exit_status, now);
+                  return;
+              }
+
+              if (tracked_count >= MAX_TRACKED) {
+                  log_line("WARN tracker full; dropping pid=%d", (int)p->pid);
+                  return;
+              }
+
+              idx = tracked_count++;
+              memset(&tracked[idx], 0, sizeof(tracked[idx]));
+              tracked[idx].pid = p->pid;
+              tracked[idx].ppid = p->ppid;
+              tracked[idx].seen = 1;
+              tracked[idx].first_ms = now;
+              tracked[idx].start_ticks = p->start_ticks;
+              tracked[idx].raw_exit_status = p->raw_exit_status;
+              tracked[idx].zombie_reported = 0;
+              snprintf(tracked[idx].comm, sizeof(tracked[idx].comm), "%s", p->comm);
+              snprintf(tracked[idx].cmd, sizeof(tracked[idx].cmd), "%s", p->cmd);
+              snprintf(tracked[idx].exe, sizeof(tracked[idx].exe), "%s", p->exe);
+              snprintf(tracked[idx].state, sizeof(tracked[idx].state), "%s", p->state);
+
+              log_line("PROC+ t=%llums pid=%d ppid=%d start=%llu state=%s raw_wait_status=%lld comm=%s exe=%s cmd=%s",
+                       now,
+                       (int)p->pid,
+                       (int)p->ppid,
+                       p->start_ticks,
+                       p->state[0] ? p->state : "-",
+                       p->raw_exit_status,
+                       p->comm[0] ? p->comm : "-",
+                       p->exe[0] ? p->exe : "-",
+                       p->cmd[0] ? p->cmd : "-");
+              ++events;
+
+              if (p->state[0] == 'Z')
+                  report_zombie(&tracked[idx], p->raw_exit_status, now);
+          }
+
+          static void retire_missing(void) {
+              unsigned long long now = monotonic_ms() - start_ms;
+              int i = 0;
+
+              while (i < tracked_count) {
+                  if (tracked[i].seen) {
+                      tracked[i].seen = 0;
+                      ++i;
+                      continue;
+                  }
+
+                  log_line("PROC- t=%llums pid=%d ppid=%d start=%llu lifetime=%llums state=%s raw_wait_status=%lld comm=%s exe=%s cmd=%s",
+                           now,
+                           (int)tracked[i].pid,
+                           (int)tracked[i].ppid,
+                           tracked[i].start_ticks,
+                           now >= tracked[i].first_ms ? now - tracked[i].first_ms : 0,
+                           tracked[i].state[0] ? tracked[i].state : "-",
+                           tracked[i].raw_exit_status,
+                           tracked[i].comm[0] ? tracked[i].comm : "-",
+                           tracked[i].exe[0] ? tracked[i].exe : "-",
+                           tracked[i].cmd[0] ? tracked[i].cmd : "-");
+                  ++events;
+                  tracked[i] = tracked[tracked_count - 1];
+                  --tracked_count;
+              }
+          }
+
+          static int collect_procs(struct proc_info *procs, int cap, pid_t self_pid, pid_t parent_pid) {
+              DIR *d = opendir("/proc");
+              struct dirent *de;
+              int count = 0;
+
+              if (!d) {
+                  log_line("ERROR cannot open /proc: errno=%d", errno);
+                  return 0;
+              }
+
+              while ((de = readdir(d)) != NULL && count < cap) {
+                  pid_t pid;
+                  char path[64];
+                  struct proc_info *p;
+
+                  if (!numeric_name(de->d_name)) continue;
+                  pid = (pid_t)strtol(de->d_name, NULL, 10);
+                  if (pid <= 0 || pid == self_pid) continue;
+
+                  p = &procs[count];
+                  memset(p, 0, sizeof(*p));
+                  p->pid = pid;
+                  p->ppid = -1;
+
+                  snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+                  read_file(path, p->comm, sizeof(p->comm), 0);
+
+                  snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+                  read_file(path, p->cmd, sizeof(p->cmd), 1);
+
+                  snprintf(path, sizeof(path), "/proc/%d/exe", (int)pid);
+                  read_link(path, p->exe, sizeof(p->exe));
+
+                  read_status(pid, &p->ppid, p->state, sizeof(p->state));
+                  p->raw_exit_status = -1;
+                  {
+                      char stat_state = '\0';
+                      read_proc_stat(pid, &p->start_ticks, &p->raw_exit_status, &stat_state);
+                  }
+
+                  if (pid == parent_pid || contains_any(p->comm, p->cmd, p->exe))
+                      p->relevant = 1;
+
+                  ++count;
+              }
+
+              closedir(d);
+              return count;
+          }
+
+          static void propagate_descendants(struct proc_info *procs, int count) {
+              int changed;
+              int passes = 0;
+              do {
+                  changed = 0;
+                  for (int i = 0; i < count; ++i) {
+                      int parent_idx;
+                      if (procs[i].relevant || procs[i].ppid <= 0) continue;
+                      parent_idx = find_proc(procs, count, procs[i].ppid);
+                      if (parent_idx >= 0 && procs[parent_idx].relevant) {
+                          procs[i].relevant = 1;
+                          changed = 1;
+                      }
+                  }
+                  ++passes;
+              } while (changed && passes < 16);
+          }
+
+          static void scan_once(pid_t self_pid, pid_t parent_pid) {
+              static struct proc_info procs[MAX_PROCS];
+              int count = collect_procs(procs, MAX_PROCS, self_pid, parent_pid);
+              propagate_descendants(procs, count);
+
+              for (int i = 0; i < count; ++i) {
+                  if (procs[i].relevant) track_seen(&procs[i]);
+              }
+              retire_missing();
+              ++scans;
+          }
+
+          int main(int argc, char **argv) {
+              pid_t parent_pid;
+              pid_t self_pid = getpid();
+              struct timespec delay = {0, 20 * 1000 * 1000};
+
+              if (argc != 3) {
+                  fprintf(stdout, "[GN-MS-3.7] ERROR watcher requires parent pid and log path\n");
+                  fflush(stdout);
+                  return 2;
+              }
+
+              parent_pid = (pid_t)strtol(argv[1], NULL, 10);
+              if (parent_pid <= 1) {
+                  fprintf(stdout, "[GN-MS-3.7] ERROR invalid parent pid: %s\n", argv[1]);
+                  fflush(stdout);
+                  return 3;
+              }
+
+              diag_file = fopen(argv[2], "w");
+              if (!diag_file) {
+                  fprintf(stdout, "[GN-MS-3.7] ERROR cannot open persistent log %s errno=%d\n", argv[2], errno);
+                  fflush(stdout);
+                  return 4;
+              }
+              setvbuf(diag_file, NULL, _IOLBF, 0);
+
+              start_ms = monotonic_ms();
+              last_heartbeat_ms = 0;
+              log_line("WATCH START self=%d parent=%d poll=20ms output=stdout+file log=%s wine_debug_unchanged=1 esync_unchanged=1",
+                       (int)self_pid, (int)parent_pid, argv[2]);
+
+              for (;;) {
+                  unsigned long long now;
+                  scan_once(self_pid, parent_pid);
+                  now = monotonic_ms() - start_ms;
+
+                  if (now - last_heartbeat_ms >= 2000ULL) {
+                      int parent_alive = (kill(parent_pid, 0) == 0 || errno == EPERM) ? 1 : 0;
+                      log_line("HEARTBEAT t=%llums scans=%llu tracked=%d events=%llu parent=%d alive=%d",
+                               now, scans, tracked_count, events, (int)parent_pid, parent_alive);
+                      last_heartbeat_ms = now;
+                  }
+
+                  if (kill(parent_pid, 0) != 0 && errno == ESRCH) {
+                      log_line("TOPLEVEL-GONE t=%llums parent=%d scans=%llu tracked=%d events=%llu",
+                               now, (int)parent_pid, scans, tracked_count, events);
+                      scan_once(self_pid, parent_pid);
+                      fclose(diag_file);
+                      return 0;
+                  }
+
+                  nanosleep(&delay, NULL);
+              }
+          }
+          CWATCH
+
+          "$CC" \
+            -O2 \
+            -fPIE \
+            -pie \
+            -pthread \
+            -Wall \
+            -Wextra \
+            -o "$DIAG_ROOT/mswatch" \
+            "$GITHUB_WORKSPACE/mswatch-3.7.c"
+
+          chmod 755 "$DIAG_ROOT/mswatch"
+          test -x "$DIAG_ROOT/mswatch"
+
+          file "$DIAG_ROOT/mswatch"
+          readelf -h "$DIAG_ROOT/mswatch"
+          readelf -l "$DIAG_ROOT/mswatch" > "$GITHUB_WORKSPACE/mswatch-program-headers.txt"
+
+          grep -Fq '/system/bin/linker64' "$GITHUB_WORKSPACE/mswatch-program-headers.txt" || {
+              echo "ERROR: 3.7 watcher is not an Android/bionic AArch64 executable using linker64"
+              cat "$GITHUB_WORKSPACE/mswatch-program-headers.txt"
+              exit 1
+          }
+
+          # Preserve the proven 2.2 registry wrapper as the inner launcher.
+          rm -f "$INNER_WINE"
+          mv "$ROOT/bin/wine" "$INNER_WINE"
+          chmod 755 "$INNER_WINE"
+          sh -n "$INNER_WINE"
+
+          cat > "$ROOT/bin/wine" <<'SHDIAG'
+          #!/bin/sh
+          # GameNative MapleStory 3.7 observation-only diagnostic wrapper.
+          #
+          # 3.7 intentionally changes only the observer:
+          # - Android/bionic watcher, launched through /system/bin/linker64
+          # - persistent watcher log inside WINEPREFIX
+          # - previous watcher log is replayed on the next Wine invocation
+          # - watcher starts for every non-TestD3D top-level Wine launch
+          # - dedicated MapleStory PID monitor catches the short exit/zombie window
+          #
+          # No Wine compatibility setting is changed.
+
+          case "$0" in
+              /*)
+                  SCRIPT_PATH="$0"
+                  ;;
+              */*)
+                  SCRIPT_PATH="$PWD/$0"
+                  ;;
+              *)
+                  echo "[GN-MS-3.7] ERROR: Wine wrapper was invoked without a path: $0"
+                  exit 50
+                  ;;
+          esac
+
+          SCRIPT_DIR="${SCRIPT_PATH%/*}"
+          ROOT_DIR="${SCRIPT_DIR%/*}"
+          INNER_WINE="$SCRIPT_DIR/wine.2.2-registry"
+          WATCHER="$ROOT_DIR/share/wine/maplestory_diag_3_7/mswatch"
+          PREFIX="${WINEPREFIX:-}"
+          DIAG_LOG=""
+
+          if [ ! -x "$INNER_WINE" ]; then
+              echo "[GN-MS-3.7] ERROR: inner 2.2 Wine wrapper missing: $INNER_WINE"
+              exit 52
+          fi
+
+          if [ -n "$PREFIX" ]; then
+              DIAG_LOG="$PREFIX/.gamenative-mswatch-3.7.log"
+
+              # Belt-and-suspenders path: if GameNative does not surface the
+              # background helper's stdout, replay the previous run's file on
+              # the next invocation. This uses shell built-ins only.
+              if [ -s "$DIAG_LOG" ]; then
+                  echo "[GN-MS-3.7] PREVIOUS WATCHER LOG BEGIN"
+                  while IFS= read -r LINE || [ -n "$LINE" ]; do
+                      printf '%s\n' "$LINE"
+                  done < "$DIAG_LOG"
+                  echo "[GN-MS-3.7] PREVIOUS WATCHER LOG END"
+              fi
+          fi
+
+          echo "[GN-MS-3.7] ENTRY wrapper_pid=$$"
+          echo "[GN-MS-3.7] SteamAppId=${SteamAppId:-<unset>} SteamGameId=${SteamGameId:-<unset>} SteamClientLaunch=${SteamClientLaunch:-<unset>}"
+          echo "[GN-MS-3.7] WINEPREFIX=${WINEPREFIX:-<unset>}"
+
+          ARG_INDEX=0
+          IS_TESTD3D=0
+          for ARG in "$@"; do
+              echo "[GN-MS-3.7] ARG[$ARG_INDEX]=$ARG"
+              case "$ARG" in
+                  *TestD3D.exe*|*TESTD3D.EXE*|*testd3d.exe*)
+                      IS_TESTD3D=1
+                      ;;
+              esac
+              ARG_INDEX=$((ARG_INDEX + 1))
+          done
+
+          if [ "$IS_TESTD3D" -eq 0 ]; then
+              if [ -z "$DIAG_LOG" ]; then
+                  echo "[GN-MS-3.7] ERROR: normal diagnostic launch has no WINEPREFIX"
+                  exit 71
+              fi
+              if [ ! -x "$WATCHER" ]; then
+                  echo "[GN-MS-3.7] ERROR: process watcher missing: $WATCHER"
+                  exit 70
+              fi
+
+              echo "[GN-MS-3.7] Starting Android/bionic host-process watcher"
+              echo "[GN-MS-3.7] No WINEDEBUG/WINEESYNC/DLL override changes are being made"
+
+              # GameNative's modern Android launch path itself uses linker64.
+              # Do the same for this bionic helper. LD_PRELOAD is cleared only
+              # for the watcher so evshim does not attach to the diagnostic
+              # process. Wine keeps the original GameNative environment.
+              LD_PRELOAD= /system/bin/linker64 "$WATCHER" "$$" "$DIAG_LOG" &
+              WATCH_PID=$!
+              echo "[GN-MS-3.7] Watcher launch requested pid=$WATCH_PID parent=$$ log=$DIAG_LOG"
+          else
+              echo "[GN-MS-3.7] Watcher skipped for TestD3D"
+          fi
+
+          exec "$INNER_WINE" "$@"
+          SHDIAG
+
+          chmod 755 "$ROOT/bin/wine"
+
+          echo
+          echo "=== Validate 3.7 diagnostic wrapper ==="
+
+          test -f "$ROOT/bin/wine"
+          test ! -L "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -x "$INNER_WINE"
+          test -x "$DIAG_ROOT/mswatch"
+
+          sh -n "$ROOT/bin/wine"
+          sh -n "$INNER_WINE"
+
+          grep -Fq '/system/bin/linker64 "$WATCHER"' "$ROOT/bin/wine"
+          grep -Fq '.gamenative-mswatch-3.7.log' "$ROOT/bin/wine"
+          grep -Fq 'PREVIOUS WATCHER LOG BEGIN' "$ROOT/bin/wine"
+          grep -Fq 'Watcher skipped for TestD3D' "$ROOT/bin/wine"
+          grep -Fq 'exec "$INNER_WINE" "$@"' "$ROOT/bin/wine"
+          grep -Fq 'exec "$REAL_WINE" "$@"' "$INNER_WINE"
+          grep -Fq 'HEARTBEAT' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq '/proc/%d/exe' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'propagate_descendants' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'PROC+' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'PROC-' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'PROC~' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'STATE~' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'ZOMBIE' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'raw_wait_status' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'field 52 = exit_code' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'decode_wait_status' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'MAPLE-MONITOR START' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'MAPLE-HOT-ARM' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'MAPLE-HOT-ZOMBIE' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'reason=exe-unavailable' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'pthread_create' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'hot_poll=busy' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+          grep -Fq 'stdout+file' "$GITHUB_WORKSPACE/mswatch-3.7.c"
+
+          # 3.6 remains observation-only.
+          if grep -Fq 'WINEDLLOVERRIDES=' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEESYNC=' "$ROOT/bin/wine" || \
+             grep -Fq 'WINEDEBUG=' "$ROOT/bin/wine" || \
+             grep -Fq 'regedit /S' "$ROOT/bin/wine"; then
+              echo "ERROR: behavior-changing Wine setting leaked into 3.7 diagnostic wrapper"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' "$ROOT/bin/wine"; then
+              echo "ERROR: 3.7 guest wrapper depends on cmp"
+              exit 1
+          fi
+
+          if grep -Fq 'SCRIPT_DIR=$(' "$ROOT/bin/wine" || \
+             grep -Fq 'ROOT_DIR=$(' "$ROOT/bin/wine"; then
+              echo "ERROR: 3.7 wrapper contains stdout-capturing path command substitution"
+              exit 1
+          fi
+
+          echo "3.7 MapleStory hot-exit diagnostic wrapper PASSED"
+
+      # ============================================================
+      # 10. CREATE NEW 3.7 GAMENATIVE PROFILE
+      # ============================================================
+
+      - name: Generate GameNative Proton profile
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat > profile.json <<'EOF'
+          {
+            "type": "Proton",
+            "versionName": "11.0-3.7-arm64ec",
+            "versionCode": 2,
+            "description": "MapleStory 3.7 diagnostic - GE-Proton11-3 ARM64EC game-fixes runtime + known-good 2.2 prefix/runtime/registry state + non-WINEDEBUG dedicated MapleStory hot-exit monitor",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          EOF
+
+          cat profile.json
+
+          grep -Fq \
+            '"versionName": "11.0-3.7-arm64ec"' \
+            profile.json
+
+          echo "3.7 profile validation PASSED"
+
+      # ============================================================
+      # 11. BUILD THE NEW 3.7 WCP
+      # ============================================================
+
+      - name: Build WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-aarch64"
+
+          cp prefixPack.txz \
+            "$ROOT/prefixPack.txz"
+
+          cp profile.json \
+            "$ROOT/profile.json"
+
+          cd "$ROOT"
+
+          tar cJf \
+            "$GITHUB_WORKSPACE/$WCP_NAME" \
+            bin \
+            lib \
+            share \
+            prefixPack.txz \
+            profile.json
+
+          ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
+
+      # ============================================================
+      # 12. VALIDATE FINAL 3.7 WCP
+      # ============================================================
+
+      - name: Validate final WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          WCP="$GITHUB_WORKSPACE/$WCP_NAME"
+
+          test -f "$WCP"
+          test -s "$WCP"
+          xz -t "$WCP"
+
+          tar tJf "$WCP" > wcp-files.txt
+
+          for f in \
+            bin/wine \
+            bin/wine.2.2-registry \
+            bin/wine.real \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_diag_3_7/mswatch \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh \
+            prefixPack.txz \
+            profile.json
+          do
+            grep -Fxq "$f" wcp-files.txt
+            echo "FOUND: $f"
+          done
+
+          tar xJOf "$WCP" profile.json > packaged-profile.json
+          grep -Fq \
+            '"versionName": "11.0-3.7-arm64ec"' \
+            packaged-profile.json
+
+          rm -rf wcp_validation
+          mkdir -p wcp_validation
+
+          tar xJf "$WCP" \
+            -C wcp_validation \
+            bin/wine \
+            bin/wine.2.2-registry \
+            bin/wine.real \
+            bin/wineserver \
+            lib/wine/aarch64-unix/wine \
+            share/wine/maplestory_diag_3_7/mswatch \
+            share/wine/maplestory_registry_recovery_2_2/baseline-values.txt \
+            share/wine/maplestory_registry_recovery_2_2/baseline-status.txt \
+            share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          test -f wcp_validation/bin/wine
+          test ! -L wcp_validation/bin/wine
+          test -x wcp_validation/bin/wine
+          test -x wcp_validation/bin/wine.2.2-registry
+          test -L wcp_validation/bin/wine.real
+          test -e wcp_validation/bin/wine.real
+          test -x wcp_validation/bin/wine.real
+          test "$(readlink wcp_validation/bin/wine.real)" = "../lib/wine/aarch64-unix/wine"
+          test -x wcp_validation/bin/wineserver
+          test -x wcp_validation/lib/wine/aarch64-unix/wine
+          test -x wcp_validation/share/wine/maplestory_diag_3_7/mswatch
+          readelf -l wcp_validation/share/wine/maplestory_diag_3_7/mswatch > packaged-mswatch-program-headers.txt
+          grep -Fq '/system/bin/linker64' packaged-mswatch-program-headers.txt
+          test -x wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          sh -n wcp_validation/bin/wine
+          sh -n wcp_validation/bin/wine.2.2-registry
+          sh -n wcp_validation/share/wine/maplestory_registry_recovery_2_2/repair-user-reg.sh
+
+          grep -Fq 'maplestory_diag_3_7/mswatch' wcp_validation/bin/wine
+          grep -Fq 'exec "$INNER_WINE" "$@"' wcp_validation/bin/wine
+          grep -Fq 'SteamAppId=${SteamAppId:-<unset>}' wcp_validation/bin/wine
+          grep -Fq 'SteamGameId=${SteamGameId:-<unset>}' wcp_validation/bin/wine
+          grep -Fq '.gamenative-mswatch-3.7.log' wcp_validation/bin/wine
+          grep -Fq 'PREVIOUS WATCHER LOG BEGIN' wcp_validation/bin/wine
+          grep -Fq 'Starting Android/bionic host-process watcher' wcp_validation/bin/wine
+          grep -Fq '/system/bin/linker64 "$WATCHER"' wcp_validation/bin/wine
+          strings wcp_validation/share/wine/maplestory_diag_3_7/mswatch > packaged-mswatch-strings.txt
+          grep -Fq 'MAPLE-HOT-ZOMBIE' packaged-mswatch-strings.txt
+          grep -Fq 'MAPLE-HOT-ARM' packaged-mswatch-strings.txt
+          grep -Fq 'MAPLE-MONITOR START' packaged-mswatch-strings.txt
+          grep -Fq '*TestD3D.exe*' wcp_validation/bin/wine
+          grep -Fq 'Watcher skipped for TestD3D' wcp_validation/bin/wine
+
+          grep -Fq 'Restoring VC DllOverrides baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'Registry recovery complete; VC DllOverrides match Proton 11 baseline' wcp_validation/bin/wine.2.2-registry
+          grep -Fq 'exec "$REAL_WINE" "$@"' wcp_validation/bin/wine.2.2-registry
+
+          if grep -Fq 'WINEDLLOVERRIDES=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEESYNC=' wcp_validation/bin/wine || \
+             grep -Fq 'WINEDEBUG=' wcp_validation/bin/wine || \
+             grep -Fq 'regedit /S' wcp_validation/bin/wine; then
+              echo "ERROR: behavior-changing Wine setting leaked into packaged 3.7 diagnostic wrapper"
+              exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])cmp([[:space:]]|$)' wcp_validation/bin/wine; then
+              echo "ERROR: packaged 3.7 guest wrapper depends on cmp"
+              exit 1
+          fi
+
+          echo "=== Packaged upstream DllOverrides baseline ==="
+          cat wcp_validation/share/wine/maplestory_registry_recovery_2_2/baseline-status.txt
+
+          # Confirm 2.2 did not mutate wine.inf for live-prefix recovery.
+          grep -Fxq 'share/wine/wine.inf' wcp-files.txt
+          tar xJOf "$WCP" share/wine/wine.inf > packaged-wine.inf
+
+          if grep -Fq 'GameNativeMapleStory216150Recovery' packaged-wine.inf; then
+              echo "ERROR: live registry recovery leaked into wine.inf"
+              exit 1
+          fi
+
+          if grep -Fq 'MapleVCRuntime64' packaged-wine.inf || \
+             grep -Fq 'MapleVCRuntime32' packaged-wine.inf; then
+              echo "ERROR: broken 1.4 runtime CopyFiles integration leaked into 3.7"
+              exit 1
+          fi
+
+          # Packaged prefix remains the controlled 1.6-compatible state for
+          # genuinely new prefixes: MapleStory registry fixes plus only
+          # vcruntime140_threads.dll added to the untouched VC file baseline.
+          tar xJOf "$WCP" prefixPack.txz > packaged-prefix.txz
+          rm -rf packaged_prefix packaged_base_prefix
+          mkdir -p packaged_prefix packaged_base_prefix
+          tar xJf packaged-prefix.txz -C packaged_prefix
+          tar xJf prefixPack-base.txz -C packaged_base_prefix
+
+          PREFIX_DRIVE_C="$(find packaged_prefix -type d -name drive_c -print -quit)"
+          BASE_DRIVE_C="$(find packaged_base_prefix -type d -name drive_c -print -quit)"
+          USER_REG="$(find packaged_prefix -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find packaged_prefix -type f -name system.reg -print -quit)"
+
+          test -n "$PREFIX_DRIVE_C"
+          test -n "$BASE_DRIVE_C"
+          test -n "$USER_REG"
+          test -n "$SYSTEM_REG"
+
+          grep -Fq '"UseTakeFocus"="N"' "$USER_REG"
+          grep -Fq '"UseLinuxInputEvents"="Y"' "$USER_REG"
+          grep -Fq '"KeyboardUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"MouseUseNonExclusive"="Y"' "$USER_REG"
+          grep -Fq '"Version"="win10"' "$USER_REG"
+          grep -Fq '"cb_access_map_w"=dword:00000001' "$USER_REG"
+          grep -Fq '"CSMT"="disabled"' "$USER_REG"
+          grep -Fq '"URL Protocol"=""' "$SYSTEM_REG"
+
+          SYS32_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll vcruntime140_1.dll'
+          WOW64_LIST='concrt140.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll ucrtbase.dll vccorlib140.dll vcomp140.dll vcruntime140.dll'
+
+          for DLL in $SYS32_LIST; do
+            BASE="$BASE_DRIVE_C/windows/system32/$DLL"
+            GOT="$PREFIX_DRIVE_C/windows/system32/$DLL"
+            if [ -f "$BASE" ]; then
+              test -f "$GOT"
+              cmp -s "$BASE" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done
+
+          for DLL in $WOW64_LIST; do
+            BASE="$BASE_DRIVE_C/windows/syswow64/$DLL"
+            GOT="$PREFIX_DRIVE_C/windows/syswow64/$DLL"
+            if [ -f "$BASE" ]; then
+              test -f "$GOT"
+              cmp -s "$BASE" "$GOT"
+            else
+              test ! -e "$GOT"
+            fi
+          done
+
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/system32/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cmp -s \
+            "$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime/syswow64/vcruntime140_threads.dll" \
+            "$PREFIX_DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          echo "Packaged prefix validation PASSED"
+
+          sha256sum "$WCP"
+
+          echo "=========================================="
+          echo "3.7 WCP validation PASSED"
+          echo "=========================================="
+
+      # ============================================================
+      # 13. UPLOAD 3.7 WCP
+      # ============================================================
+
+      - name: Upload MapleStory 3.7 MapleStory hot-exit diagnostic WCP
+        uses: actions/upload-artifact@v4
+        with:
+          name: proton-11.0-3.7-arm64ec
+          path: proton-11.0-3.7-arm64ec.wcp
+          if-no-files-found: error
+          retention-days: 30
