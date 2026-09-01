@@ -1,0 +1,934 @@
+name: Package MapleStory x86_64 3.17 Wine Architecture A-B
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+
+    env:
+      # Same GE-Proton11-3 game-fixes source line used by ARM64EC 3.1.
+      SOURCE_COMMIT: "96b37be54dab6b0bf69cd4fa23669dd186fdc183"
+      UPSTREAM_RELEASE: "build-ge11.3-20260725"
+      UPSTREAM_WCP_NAME: "GE-proton-11.0-3-x86_64-sdk28.wcp"
+      UPSTREAM_WCP_URL: "https://github.com/The412Banner/proton-wine/releases/download/build-ge11.3-20260725/GE-proton-11.0-3-x86_64-sdk28.wcp"
+      UPSTREAM_WCP_SIZE: "61287984"
+      UPSTREAM_WCP_SHA256: "92fad8d7157b4742a74aa0d288b5aca0913131b31087b6f16e9f3ba26560b60a"
+
+      # Same GameNative prefix repository commit pinned by 3.1, but x86_64 Proton 11.
+      PREFIX_COMMIT: "450f670aa65243b2e7b5364d9577eb23f17b6855"
+      PREFIX_BLOB_SHA1: "6da198aa6b573bad0b99941fe9448ab7b7001f03"
+      PREFIX_SIZE: "8270828"
+
+      # Same Linux-reference payload commit used by 2.2/3.1.
+      RUNTIME_COMMIT: "181cd74cf51db5fd2563ec81359a94db9a2ada32"
+      SYS32_THREADS_SHA256: "fcf24d7fdea131ec60e59e281fe4cebd0b5f54a49180c40bba43f859f7bc47f3"
+      WOW64_THREADS_SHA256: "644d4a3bb8cb9850c18dbc81d5f0f772d0df2bf223a9e0363eb8dd164cb77bb6"
+
+      CUSTOM_VERSION: "11.0-3.17-x86_64"
+      WCP_NAME: "proton-11.0-3.17-x86_64.wcp"
+
+    steps:
+      # ============================================================
+      # 1. PREPARE HOST TOOLS
+      # ============================================================
+
+      - name: Install archive tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd xz-utils
+          zstd --version
+          xz --version
+
+      # ============================================================
+      # 2. RESTORE THE PUBLISHED GE 11-3 x86_64 SDK28 RUNTIME
+      #
+      # This is the x86_64 binary counterpart to our ARM64EC GE 3.1
+      # source line. It avoids rebuilding Wine and keeps the A/B on:
+      #   - GE-Proton11-3 game-fixes
+      #   - source commit 96b37be...
+      #   - Android SDK28 / 4K-page target
+      #
+      # The upstream release documents this x86_64 variant as Box64,
+      # built/on-artifact-checked but not device-booted.
+      # ============================================================
+
+      - name: Download and verify published GE 11-3 x86_64 SDK28 WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          wget \
+            "$UPSTREAM_WCP_URL" \
+            -O upstream-x86_64.wcp
+
+          test -s upstream-x86_64.wcp
+          test "$(stat -c %s upstream-x86_64.wcp)" -eq "$UPSTREAM_WCP_SIZE"
+
+          printf '%s  %s\n' \
+            "$UPSTREAM_WCP_SHA256" \
+            "upstream-x86_64.wcp" \
+            | sha256sum -c -
+
+          echo "Published x86_64 WCP hash/size validation PASSED"
+
+      - name: Extract and validate x86_64 Wine runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf upstream_extract "$HOME/compiled-files-x86_64"
+          mkdir -p upstream_extract "$HOME/compiled-files-x86_64"
+
+          # The published WCP is expected to be zstd-compressed. Keep an XZ
+          # fallback solely for archive-format robustness; the content hash
+          # above remains the authoritative upstream identity.
+          if zstd -t upstream-x86_64.wcp >/dev/null 2>&1; then
+            tar --zstd -xf upstream-x86_64.wcp -C upstream_extract
+          elif xz -t upstream-x86_64.wcp >/dev/null 2>&1; then
+            tar -xJf upstream-x86_64.wcp -C upstream_extract
+          else
+            echo "ERROR: upstream WCP is neither valid zstd nor XZ"
+            exit 1
+          fi
+
+          test -d upstream_extract/bin
+          test -d upstream_extract/lib
+          test -d upstream_extract/share
+
+          test -L upstream_extract/bin/wine
+          test "$(readlink upstream_extract/bin/wine)" = "../lib/wine/x86_64-unix/wine"
+          test -e upstream_extract/bin/wine
+          test -x upstream_extract/bin/wine
+          test -x upstream_extract/bin/wineserver
+          test -x upstream_extract/lib/wine/x86_64-unix/wine
+
+          # This A/B must not accidentally package the ARM64EC Unix loader.
+          test ! -e upstream_extract/lib/wine/aarch64-unix/wine
+
+          cp -a upstream_extract/bin "$HOME/compiled-files-x86_64/"
+          cp -a upstream_extract/lib "$HOME/compiled-files-x86_64/"
+          cp -a upstream_extract/share "$HOME/compiled-files-x86_64/"
+
+          ROOT="$HOME/compiled-files-x86_64"
+
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/x86_64-unix/wine"
+          test -x "$ROOT/lib/wine/x86_64-unix/wine"
+
+          echo "=== x86_64 runtime ==="
+          du -sh "$ROOT"
+          file "$ROOT/lib/wine/x86_64-unix/wine"
+          file "$ROOT/bin/wineserver"
+          sha256sum "$ROOT/lib/wine/x86_64-unix/wine"
+
+          echo "GE 11-3 x86_64 SDK28 runtime validation PASSED"
+
+      # ============================================================
+      # 3. DOWNLOAD THE PINNED PROTON 11 x86_64 PREFIX
+      #
+      # Same prefix repository commit as 3.1:
+      #   450f670aa65243b2e7b5364d9577eb23f17b6855
+      #
+      # Correct architecture-specific file:
+      #   prefixPack-x86_64-11.txz
+      # ============================================================
+
+      - name: Download and verify GameNative Proton 11 x86_64 prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          wget \
+            "https://raw.githubusercontent.com/GameNative/bionic-prefix-files/$PREFIX_COMMIT/prefixPack-x86_64-11.txz" \
+            -O prefixPack-base.txz
+
+          test -s prefixPack-base.txz
+          test "$(stat -c %s prefixPack-base.txz)" -eq "$PREFIX_SIZE"
+          xz -t prefixPack-base.txz
+
+          # Verify the exact Git blob identity published in the pinned tree.
+          python3 - \
+            prefixPack-base.txz \
+            "$PREFIX_BLOB_SHA1" <<'PY_BLOB'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          expected = sys.argv[2]
+          data = path.read_bytes()
+          header = f"blob {len(data)}\0".encode()
+          actual = hashlib.sha1(header + data).hexdigest()
+
+          print(f"prefix git-blob-sha1={actual}")
+          if actual != expected:
+              raise SystemExit(
+                  f"ERROR: prefix blob mismatch: expected={expected} actual={actual}"
+              )
+          PY_BLOB
+
+          echo "=== Pinned x86_64 Proton 11 prefix ==="
+          ls -lh prefixPack-base.txz
+          sha256sum prefixPack-base.txz
+
+          echo "Pinned x86_64 prefix validation PASSED"
+
+      # ============================================================
+      # 4. CHECK OUT ONLY THE KNOWN-GOOD THREAD RUNTIME PAYLOAD
+      #
+      # 3.17 deliberately does NOT carry the 3.16 app-local
+      # vcruntime140.dll test forward.
+      # ============================================================
+
+      - name: Checkout pinned MapleStory VC runtime payload
+        uses: actions/checkout@v4
+        with:
+          repository: oldschoola/linux_maplestory
+          ref: ${{ env.RUNTIME_COMMIT }}
+          path: maplestory_reference
+          sparse-checkout: |
+            files/vc_runtime
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate pinned vcruntime140_threads payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+          SYS64="$PAYLOAD/system32/vcruntime140_threads.dll"
+          WOW32="$PAYLOAD/syswow64/vcruntime140_threads.dll"
+
+          test "$(git -C "$GITHUB_WORKSPACE/maplestory_reference" rev-parse HEAD)" = "$RUNTIME_COMMIT"
+
+          test -s "$SYS64"
+          test -s "$WOW32"
+          test "$(stat -c %s "$SYS64")" -eq 38480
+          test "$(stat -c %s "$WOW32")" -eq 36000
+
+          printf '%s  %s\n' "$SYS32_THREADS_SHA256" "$SYS64" | sha256sum -c -
+          printf '%s  %s\n' "$WOW64_THREADS_SHA256" "$WOW32" | sha256sum -c -
+
+          python3 - "$SYS64" "$WOW32" <<'PY_PE'
+          import struct
+          import sys
+          from pathlib import Path
+
+          expected = {
+              Path(sys.argv[1]): 0x8664,  # AMD64
+              Path(sys.argv[2]): 0x014c,  # I386
+          }
+
+          for path, wanted in expected.items():
+              data = path.read_bytes()
+              if data[:2] != b"MZ":
+                  raise RuntimeError(f"{path}: not MZ")
+              peoff = struct.unpack_from("<I", data, 0x3c)[0]
+              if data[peoff:peoff + 4] != b"PE\0\0":
+                  raise RuntimeError(f"{path}: invalid PE")
+              machine = struct.unpack_from("<H", data, peoff + 4)[0]
+              print(f"{path.name}: machine=0x{machine:04x}")
+              if machine != wanted:
+                  raise RuntimeError(
+                      f"{path}: expected machine=0x{wanted:04x}, got 0x{machine:04x}"
+                  )
+          PY_PE
+
+          echo "Pinned thread-runtime payload validation PASSED"
+
+      # ============================================================
+      # 5. APPLY THE SAME MAPLESTORY REGISTRY PARITY LAYER AS 3.1
+      #
+      # No nested Wine/regedit is used. Hives are edited offline.
+      # DllOverrides are intentionally NOT forced here; the 2.2 recovery
+      # layer below derives those ten values from the untouched x86_64
+      # Proton 11 prefix baseline.
+      # ============================================================
+
+      - name: Patch MapleStory registry settings into x86_64 prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf prefix_work
+          mkdir -p prefix_work
+          tar -xJf prefixPack-base.txz -C prefix_work
+
+          USER_REG="$(find prefix_work -type f -name user.reg -print -quit)"
+          SYSTEM_REG="$(find prefix_work -type f -name system.reg -print -quit)"
+          USERDEF_REG="$(find prefix_work -type f -name userdef.reg -print -quit || true)"
+
+          test -n "$USER_REG"
+          test -s "$USER_REG"
+          test -n "$SYSTEM_REG"
+          test -s "$SYSTEM_REG"
+
+          python3 - \
+            "$USER_REG" \
+            "$SYSTEM_REG" \
+            "${USERDEF_REG:-}" <<'PY_REG'
+          import re
+          import sys
+          from pathlib import Path
+
+          user_reg = Path(sys.argv[1])
+          system_reg = Path(sys.argv[2])
+          userdef_reg = Path(sys.argv[3]) if sys.argv[3] else None
+
+          def string_value(value):
+              value = value.replace("\\", "\\\\").replace('"', '\\"')
+              return f'"{value}"'
+
+          def value_name(name):
+              if name is None:
+                  return "@"
+              return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+          def render(name, kind, value):
+              prefix = value_name(name) + "="
+              if kind == "str":
+                  return prefix + string_value(value)
+              if kind == "dword":
+                  return prefix + f"dword:{value:08x}"
+              raise ValueError(kind)
+
+          USER_PATCHES = {
+              r"Software\\Wine\\X11 Driver": {
+                  "UseTakeFocus": ("str", "N"),
+                  "Grab": ("str", "N"),
+                  "GrabFullscreen": ("str", "N"),
+                  "UseLinuxInputEvents": ("str", "Y"),
+              },
+              r"Software\\Wine\\DirectInput": {
+                  "UseLinuxInputEvents": ("str", "Y"),
+                  "KeyboardUseNonExclusive": ("str", "Y"),
+                  "MouseUseNonExclusive": ("str", "Y"),
+              },
+              r"Software\\Wine\\AppDefaults\\MapleStory.exe": {
+                  "Version": ("str", "win10"),
+              },
+              r"Software\\Wine\\AppDefaults\\nxsteam.exe": {
+                  "Version": ("str", "win10"),
+              },
+              r"Software\\Wine\\AppDefaults\\SteamConnectorHelper.exe": {
+                  "Version": ("str", "win10"),
+              },
+              r"Software\\Nexon Launcher": {
+                  "Install Directory": ("str", r"C:\Nexon\Launcher"),
+                  "Region": ("str", "1"),
+                  "User Data": (
+                      "str",
+                      '{"setup-id":"372e7640-20f4-419c-ada0-4ad0d76c33d9","time":1748271149}',
+                  ),
+              },
+              r"Software\\Wine\\Direct3D": {
+                  "cb_access_map_w": ("dword", 1),
+                  "CSMT": ("str", "disabled"),
+              },
+          }
+
+          SYSTEM_PATCHES = {
+              r"Software\\Classes\\Applications\\nexon_launcher.exe\\shell\\open": {
+                  "FriendlyAppName": ("str", "Nexon Launcher"),
+              },
+              r"Software\\Classes\\nxl": {
+                  None: ("str", "URL:nxl protocol"),
+                  "URL Protocol": ("str", ""),
+              },
+              r"Software\\Classes\\nxl\\DefaultIcon": {
+                  None: ("str", r"C:\Nexon\Launcher\nexon_launcher.exe"),
+              },
+              r"Software\\Classes\\nxl\\shell": {
+                  None: ("str", ""),
+              },
+              r"Software\\Classes\\nxl\\shell\\open": {
+                  None: ("str", ""),
+                  "Friendly App Name": ("str", "Nexon Launcher"),
+              },
+              r"Software\\Classes\\nxl\\shell\\open\\command": {
+                  None: (
+                      "str",
+                      r'"C:\Nexon\Launcher\nexon_launcher.exe" "%1"',
+                  ),
+              },
+              r"Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Nexon Nexon Launcher": {
+                  "DisplayIcon": ("str", r'"C:\Nexon\Launcher\logo.ico"'),
+                  "DisplayName": ("str", "Nexon Launcher"),
+                  "DisplayVersion": ("str", "2.3.0"),
+                  "EstimatedSize": ("dword", 0x2B48),
+                  "HelpLink": ("str", r'"http://www.nexon.net/legal/terms-of-use/"'),
+                  "InstallLocation": ("str", r'"C:\Nexon\Launcher"'),
+                  "NoModify": ("dword", 1),
+                  "NoRepair": ("dword", 1),
+                  "Publisher": ("str", "Nexon"),
+                  "QuietUninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe" /S',
+                  ),
+                  "UninstallString": (
+                      "str",
+                      r'"C:\Nexon\Launcher\uninstall.exe"',
+                  ),
+                  "URLInfoAbout": ("str", r'"http://www.nexon.net"'),
+                  "URLUpdateInfo": ("str", r'"http://www.nexon.net"'),
+                  "VersionMajor": ("dword", 2),
+                  "VersionMinor": ("dword", 3),
+              },
+          }
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+
+          def find_section(lines, section):
+              for index, line in enumerate(lines):
+                  match = section_re.match(line)
+                  if match and match.group(1) == section:
+                      end = len(lines)
+                      for next_index in range(index + 1, len(lines)):
+                          if section_re.match(lines[next_index]):
+                              end = next_index
+                              break
+                      return index, end
+              return None
+
+          def patch_hive(path, patches):
+              lines = path.read_text(encoding="utf-8", errors="strict").splitlines()
+
+              for section, values in patches.items():
+                  current = find_section(lines, section)
+                  if current is None:
+                      if lines and lines[-1] != "":
+                          lines.append("")
+                      lines.append(f"[{section}]")
+                      for name, (kind, value) in values.items():
+                          lines.append(render(name, kind, value))
+                      continue
+
+                  for name, (kind, value) in values.items():
+                      desired = render(name, kind, value)
+                      token = value_name(name) + "="
+                      start, end = find_section(lines, section)
+                      replaced = False
+
+                      for line_index in range(start + 1, end):
+                          if lines[line_index].startswith(token):
+                              lines[line_index] = desired
+                              replaced = True
+                              break
+
+                      if not replaced:
+                          lines.insert(end, desired)
+
+              path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          def verify_hive(path, patches):
+              text = path.read_text(encoding="utf-8", errors="strict")
+              lines = text.splitlines()
+
+              for section, values in patches.items():
+                  if not any(
+                      (m := section_re.match(line)) and m.group(1) == section
+                      for line in lines
+                  ):
+                      raise RuntimeError(f"Missing registry section {section} in {path}")
+
+                  for name, (kind, value) in values.items():
+                      wanted = render(name, kind, value)
+                      if wanted not in text:
+                          raise RuntimeError(f"Missing registry value {wanted} in {path}")
+
+          patch_hive(user_reg, USER_PATCHES)
+          patch_hive(system_reg, SYSTEM_PATCHES)
+
+          if userdef_reg and userdef_reg.exists():
+              patch_hive(userdef_reg, USER_PATCHES)
+
+          verify_hive(user_reg, USER_PATCHES)
+          verify_hive(system_reg, SYSTEM_PATCHES)
+
+          if userdef_reg and userdef_reg.exists():
+              verify_hive(userdef_reg, USER_PATCHES)
+
+          print("MapleStory registry parity validation PASSED")
+          PY_REG
+
+          tar cJf prefixPack-registry.txz -C prefix_work .
+          test -s prefixPack-registry.txz
+          xz -t prefixPack-registry.txz
+
+      # ============================================================
+      # 6. CARRY FORWARD THE KNOWN-GOOD 2.2 RUNTIME STATE + 3.12 SIDECARS
+      #
+      # Exactly two reference VC payload files are copied:
+      #   AMD64 system32/vcruntime140_threads.dll
+      #   I386  syswow64/vcruntime140_threads.dll
+      #
+      # Also preserve the already-tested 3.12 sidecar parity so architecture
+      # is the intended compatibility variable:
+      #   C:\.mappings.ini
+      #   %APPDATA%\NexonLauncher\apps-settings.db
+      # ============================================================
+
+      - name: Build final x86_64 MapleStory prefix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PAYLOAD="$GITHUB_WORKSPACE/maplestory_reference/files/vc_runtime"
+
+          rm -rf prefix_final_work
+          mkdir -p prefix_final_work
+          tar -xJf prefixPack-registry.txz -C prefix_final_work
+
+          DRIVE_C="$(find prefix_final_work -type d -name drive_c -print -quit)"
+          test -n "$DRIVE_C"
+          test -d "$DRIVE_C/windows/system32"
+          test -d "$DRIVE_C/windows/syswow64"
+
+          cp -f \
+            "$PAYLOAD/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll"
+
+          cp -f \
+            "$PAYLOAD/syswow64/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          chmod 0644 \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll"
+
+          printf '%s  %s\n' \
+            "$SYS32_THREADS_SHA256" \
+            "$DRIVE_C/windows/system32/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          printf '%s  %s\n' \
+            "$WOW64_THREADS_SHA256" \
+            "$DRIVE_C/windows/syswow64/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          printf '%s\n' \
+            'MapleStory.exe=MapleStory' \
+            'nexon_client.exe=Nexon Launcher' \
+            'nexon_updater.exe=Nexon Updater' \
+            > "$DRIVE_C/.mappings.ini"
+
+          APPDATA="$DRIVE_C/users/xuser/AppData/Roaming/NexonLauncher"
+          mkdir -p "$APPDATA"
+          printf '%s' '{"locale":"en_US"}' > "$APPDATA/apps-settings.db"
+
+          test "$(sha256sum "$DRIVE_C/.mappings.ini" | awk '{print $1}')" = \
+            "f8ed2469d7c4f9ce702120338dde7221268718fa725bd0ad4449bb3642058072"
+
+          test "$(sha256sum "$APPDATA/apps-settings.db" | awk '{print $1}')" = \
+            "c8b78bb587af4401eeb0626c9bc2897e512ab05f056406dec0e6ced8c89e3618"
+
+          # Architecture marker: place it INSIDE the actual Wine prefix.
+          # Final validation checks that this marker lives inside the Wine prefix.
+          PREFIX_DIR="$(dirname "$DRIVE_C")"
+          test -f "$PREFIX_DIR/user.reg"
+          cat > "$PREFIX_DIR/.gamenative-maplestory-3.17-x86_64-prefix" <<EOF_MARKER
+          Experiment=3.17
+          Architecture=x86_64
+          WineUnixLoader=x86_64-unix
+          GEProtonSourceCommit=$SOURCE_COMMIT
+          PrefixCommit=$PREFIX_COMMIT
+          RuntimeCommit=$RUNTIME_COMMIT
+          SDK=28
+          Translation=Box64
+          EOF_MARKER
+
+          tar cJf prefixPack.txz -C prefix_final_work .
+          test -s prefixPack.txz
+          xz -t prefixPack.txz
+
+          rm -rf prefix_verify
+          mkdir -p prefix_verify
+          tar -xJf prefixPack.txz -C prefix_verify
+
+          VERIFY_C="$(find prefix_verify -type d -name drive_c -print -quit)"
+          test -n "$VERIFY_C"
+          VERIFY_PREFIX="$(dirname "$VERIFY_C")"
+          test -f "$VERIFY_PREFIX/user.reg"
+          test -f "$VERIFY_PREFIX/.gamenative-maplestory-3.17-x86_64-prefix"
+          test ! -e prefix_verify/.gamenative-maplestory-3.17-x86_64-prefix
+          test -f "$VERIFY_C/.mappings.ini"
+          test -f "$VERIFY_C/users/xuser/AppData/Roaming/NexonLauncher/apps-settings.db"
+
+          printf '%s  %s\n' \
+            "$SYS32_THREADS_SHA256" \
+            "$VERIFY_C/windows/system32/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          printf '%s  %s\n' \
+            "$WOW64_THREADS_SHA256" \
+            "$VERIFY_C/windows/syswow64/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          echo "Final 3.17 x86_64 prefix validation PASSED"
+
+      # ============================================================
+      # 7. VERIFY THE 2.2 REGISTRY STATE WITHOUT WRAPPING bin/wine
+      #
+      # GameNative launches x86_64 Wine as:
+      #   box64 wine ...
+      # Therefore bin/wine MUST remain an x86_64 ELF (or a symlink to one).
+      # A shell wrapper at bin/wine is not Box64-launchable and would make
+      # the container exit before Wine starts.
+      #
+      # Preserve the known-good 2.2 *state* by proving that the ten VC
+      # DllOverrides in the final prefix still match the untouched x86_64
+      # Proton 11 prefix baseline. No runtime wrapper is used.
+      # ============================================================
+
+      - name: Validate x86_64 native Wine launcher and 2.2 registry baseline
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-x86_64"
+
+          # Critical Box64 contract: GameNative passes this path directly to
+          # box64, so it must resolve to the real x86_64 ELF Wine loader.
+          test -L "$ROOT/bin/wine"
+          test "$(readlink "$ROOT/bin/wine")" = "../lib/wine/x86_64-unix/wine"
+          test -e "$ROOT/bin/wine"
+          test -x "$ROOT/bin/wine"
+          test -x "$ROOT/lib/wine/x86_64-unix/wine"
+          test ! -e "$ROOT/bin/wine.real"
+
+          file -L "$ROOT/bin/wine"
+          file -L "$ROOT/bin/wine" | grep -Eq 'ELF 64-bit.*x86-64'
+
+          # Compare the ten DllOverrides targets against the untouched
+          # architecture-correct Proton 11 x86_64 prefix. Step 5 deliberately
+          # does not modify these values, so any mismatch is contamination.
+          rm -rf recovery_registry_base recovery_registry_final
+          mkdir -p recovery_registry_base recovery_registry_final
+          tar -xJf prefixPack-base.txz -C recovery_registry_base
+          tar -xJf prefixPack.txz -C recovery_registry_final
+
+          BASE_USER_REG="$(find recovery_registry_base -type f -name user.reg -print -quit)"
+          FINAL_USER_REG="$(find recovery_registry_final -type f -name user.reg -print -quit)"
+
+          test -n "$BASE_USER_REG"
+          test -s "$BASE_USER_REG"
+          test -n "$FINAL_USER_REG"
+          test -s "$FINAL_USER_REG"
+
+          python3 - \
+            "$BASE_USER_REG" \
+            "$FINAL_USER_REG" <<'PY_22_BASELINE'
+          import re
+          import sys
+          from pathlib import Path
+
+          section = r"Software\\Wine\\DllOverrides"
+          targets = [
+              "concrt140",
+              "msvcp140",
+              "msvcp140_1",
+              "msvcp140_2",
+              "msvcp140_atomic_wait",
+              "msvcp140_codecvt_ids",
+              "ucrtbase",
+              "vcomp140",
+              "vcruntime140",
+              "vcruntime140_1",
+          ]
+
+          section_re = re.compile(r"^\[([^\]]+)\](?:\s+.*)?$")
+          value_re = re.compile(r'^"([^"]+)"=(.*)$')
+
+          def read_targets(path):
+              lines = Path(path).read_text(encoding="utf-8", errors="strict").splitlines()
+              in_section = False
+              found = {}
+
+              for line in lines:
+                  match = section_re.match(line)
+                  if match:
+                      in_section = match.group(1) == section
+                      continue
+
+                  if not in_section:
+                      continue
+
+                  match = value_re.match(line)
+                  if not match:
+                      continue
+
+                  name = match.group(1).lower()
+                  if name not in targets:
+                      continue
+
+                  if name in found:
+                      raise RuntimeError(f"Duplicate DllOverrides value {name} in {path}")
+
+                  found[name] = line
+
+              return found
+
+          base = read_targets(sys.argv[1])
+          final = read_targets(sys.argv[2])
+
+          failures = []
+          for name in targets:
+              before = base.get(name)
+              after = final.get(name)
+              print(f"{name}: baseline={before!r} final={after!r}")
+              if before != after:
+                  failures.append((name, before, after))
+
+          if failures:
+              details = "; ".join(
+                  f"{name}: baseline={before!r} final={after!r}"
+                  for name, before, after in failures
+              )
+              raise RuntimeError(f"2.2 DllOverrides baseline mismatch: {details}")
+
+          print("2.2 x86_64 DllOverrides baseline validation PASSED")
+          PY_22_BASELINE
+
+          # V3 intentionally has no live-prefix recovery wrapper. A fresh
+          # x86_64 test container must consume the validated prefixPack.
+          if find "$ROOT/share/wine" -maxdepth 1 -type d \
+               -name 'maplestory_registry_recovery_2_2' | grep -q .; then
+              echo "ERROR: obsolete live recovery wrapper payload leaked into V3"
+              exit 1
+          fi
+
+          echo "3.17 x86_64 native Box64 launcher validation PASSED"
+
+      # ============================================================
+      # 8. ADD PROVENANCE AND CREATE THE GAMENATIVE PROFILE
+      # ============================================================
+
+      - name: Add 3.17 provenance
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-x86_64"
+          mkdir -p "$ROOT/share/wine/maplestory_3_17"
+
+          cat > "$ROOT/share/wine/maplestory_3_17/provenance.txt" <<EOF_PROVENANCE
+          Experiment=3.17
+          Purpose=x86_64 Wine architecture A/B
+          GEProtonSourceCommit=$SOURCE_COMMIT
+          UpstreamRelease=$UPSTREAM_RELEASE
+          UpstreamAsset=$UPSTREAM_WCP_NAME
+          UpstreamAssetSHA256=$UPSTREAM_WCP_SHA256
+          SDK=28
+          WineArchitecture=x86_64
+          Translator=Box64
+          PrefixCommit=$PREFIX_COMMIT
+          PrefixGitBlobSHA1=$PREFIX_BLOB_SHA1
+          RuntimeCommit=$RUNTIME_COMMIT
+          System32ThreadsSHA256=$SYS32_THREADS_SHA256
+          SysWOW64ThreadsSHA256=$WOW64_THREADS_SHA256
+          AppLocalVCRUNTIME140=not-carried-forward
+          WineDebug=unchanged
+          Esync=unchanged
+          Graphics=unchanged
+          RegistryRecoveryMode=offline-prefix-baseline-no-wrapper
+          Box64WineEntry=direct-x86_64-ELF
+          RequiresFreshSeparateContainer=yes
+          EOF_PROVENANCE
+
+          cat "$ROOT/share/wine/maplestory_3_17/provenance.txt"
+
+      - name: Generate GameNative Proton profile
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat > profile.json <<'EOF_PROFILE'
+          {
+            "type": "Proton",
+            "versionName": "11.0-3.17-x86_64",
+            "versionCode": 3,
+            "description": "MapleStory 3.17 - GE-Proton11-3 x86_64 SDK28 / Box64 architecture A-B; same GE source line and validated 2.2 registry/runtime state; direct Box64 x86_64 Wine entry; requires a separate fresh x86_64 prefix",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          EOF_PROFILE
+
+          python3 -m json.tool profile.json >/dev/null
+
+          grep -Fq '"versionName": "11.0-3.17-x86_64"' profile.json
+          grep -Fq '"versionCode": 3' profile.json
+
+          if grep -Fqi 'arm64ec' profile.json; then
+              echo "ERROR: ARM64EC leaked into 3.17 profile"
+              exit 1
+          fi
+
+          echo "3.17 profile validation PASSED"
+
+      # ============================================================
+      # 9. BUILD THE CUSTOM 3.17 WCP
+      # ============================================================
+
+      - name: Build 3.17 x86_64 WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$HOME/compiled-files-x86_64"
+
+          cp prefixPack.txz "$ROOT/prefixPack.txz"
+          cp profile.json "$ROOT/profile.json"
+
+          test -d "$ROOT/bin"
+          test -d "$ROOT/lib"
+          test -d "$ROOT/share"
+          test -s "$ROOT/prefixPack.txz"
+          test -s "$ROOT/profile.json"
+
+          tar cJf \
+            "$GITHUB_WORKSPACE/$WCP_NAME" \
+            -C "$ROOT" \
+            bin \
+            lib \
+            share \
+            prefixPack.txz \
+            profile.json
+
+          test -s "$GITHUB_WORKSPACE/$WCP_NAME"
+          xz -t "$GITHUB_WORKSPACE/$WCP_NAME"
+
+          ls -lh "$GITHUB_WORKSPACE/$WCP_NAME"
+          sha256sum "$GITHUB_WORKSPACE/$WCP_NAME"
+
+      # ============================================================
+      # 10. FINAL ARCHIVE / STALE-REFERENCE VALIDATION
+      # ============================================================
+
+      - name: Validate final 3.17 WCP
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          WCP="$GITHUB_WORKSPACE/$WCP_NAME"
+
+          rm -rf wcp-validation
+          mkdir -p wcp-validation
+
+          tar tJf "$WCP" > wcp-files.txt
+
+          grep -Fxq 'bin/wine' wcp-files.txt
+          grep -Fxq 'bin/wineserver' wcp-files.txt
+          if grep -Fxq 'bin/wine.real' wcp-files.txt; then
+              echo "ERROR: obsolete wine.real wrapper indirection leaked into V3"
+              exit 1
+          fi
+          grep -Fxq 'lib/wine/x86_64-unix/wine' wcp-files.txt
+          grep -Fxq 'prefixPack.txz' wcp-files.txt
+          grep -Fxq 'profile.json' wcp-files.txt
+
+          if grep -Fq 'lib/wine/aarch64-unix/' wcp-files.txt; then
+              echo "ERROR: AArch64 Unix Wine tree leaked into x86_64 WCP"
+              exit 1
+          fi
+
+          tar xJf "$WCP" -C wcp-validation
+
+          test -L wcp-validation/bin/wine
+          test "$(readlink wcp-validation/bin/wine)" = "../lib/wine/x86_64-unix/wine"
+          test -e wcp-validation/bin/wine
+          test -x wcp-validation/bin/wine
+          test ! -e wcp-validation/bin/wine.real
+
+          test -x wcp-validation/bin/wineserver
+          test -x wcp-validation/lib/wine/x86_64-unix/wine
+          file -L wcp-validation/bin/wine
+          file -L wcp-validation/bin/wine | grep -Eq 'ELF 64-bit.*x86-64'
+
+          python3 -m json.tool wcp-validation/profile.json >/dev/null
+
+          grep -Fq '"versionName": "11.0-3.17-x86_64"' wcp-validation/profile.json
+          grep -Fq 'Architecture=x86_64' \
+            wcp-validation/share/wine/maplestory_3_17/provenance.txt
+          grep -Fq 'Translator=Box64' \
+            wcp-validation/share/wine/maplestory_3_17/provenance.txt
+
+          rm -rf final-prefix-check
+          mkdir -p final-prefix-check
+          tar -xJf wcp-validation/prefixPack.txz -C final-prefix-check
+
+          FINAL_C="$(find final-prefix-check -type d -name drive_c -print -quit)"
+          test -n "$FINAL_C"
+          FINAL_PREFIX="$(dirname "$FINAL_C")"
+          test -f "$FINAL_PREFIX/user.reg"
+          test -f "$FINAL_PREFIX/.gamenative-maplestory-3.17-x86_64-prefix"
+          test ! -e final-prefix-check/.gamenative-maplestory-3.17-x86_64-prefix
+
+          test "$(sha256sum "$FINAL_C/.mappings.ini" | awk '{print $1}')" = \
+            "f8ed2469d7c4f9ce702120338dde7221268718fa725bd0ad4449bb3642058072"
+
+          test "$(sha256sum "$FINAL_C/users/xuser/AppData/Roaming/NexonLauncher/apps-settings.db" | awk '{print $1}')" = \
+            "c8b78bb587af4401eeb0626c9bc2897e512ab05f056406dec0e6ced8c89e3618"
+
+          printf '%s  %s\n' \
+            "$SYS32_THREADS_SHA256" \
+            "$FINAL_C/windows/system32/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          printf '%s  %s\n' \
+            "$WOW64_THREADS_SHA256" \
+            "$FINAL_C/windows/syswow64/vcruntime140_threads.dll" \
+            | sha256sum -c -
+
+          # Stale experiment/runtime references that would contaminate 3.17.
+          # bin/wine is now the real binary entrypoint, so architecture is
+          # validated structurally rather than grepping binary data.
+          if grep -R -Fq 'maplestory_vcruntime_app_local_3_16' wcp-validation/share/wine/maplestory_3_17 || \
+             grep -Fq 'maplestory_vcruntime_app_local_3_16' wcp-validation/profile.json; then
+              echo "ERROR: 3.16 app-local vcruntime test leaked into 3.17"
+              exit 1
+          fi
+
+          if grep -R -Fq 'aarch64-unix' wcp-validation/share/wine/maplestory_3_17 || \
+             grep -Fq 'aarch64-unix' wcp-validation/profile.json; then
+              echo "ERROR: stale aarch64-unix reference leaked into 3.17 control files"
+              exit 1
+          fi
+
+          if grep -R -Fqi 'arm64ec' wcp-validation/share/wine/maplestory_3_17 || \
+             grep -Fqi 'arm64ec' wcp-validation/profile.json; then
+              echo "ERROR: stale ARM64EC reference leaked into 3.17 control files"
+              exit 1
+          fi
+
+          if find wcp-validation/share/wine -maxdepth 1 -type d \
+               -name 'maplestory_registry_recovery_2_2' | grep -q .; then
+              echo "ERROR: obsolete live recovery wrapper payload leaked into V3"
+              exit 1
+          fi
+
+          echo
+          echo "=== Final 3.17 artifact ==="
+          ls -lh "$WCP"
+          sha256sum "$WCP"
+
+          echo "Final 3.17 x86_64 WCP validation PASSED"
+
+      - name: Upload 3.17 x86_64 WCP
+        uses: actions/upload-artifact@v4
+        with:
+          name: proton-11.0-3.17-x86_64
+          path: proton-11.0-3.17-x86_64.wcp
+          retention-days: 7
+          compression-level: 0
